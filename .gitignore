@@ -1,3 +1,6 @@
+# DiCE helper download artefact — downloaded to cwd on each call, never auto-deleted
+adult.zip
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

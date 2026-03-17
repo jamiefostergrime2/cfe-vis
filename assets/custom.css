@@ -1,0 +1,17 @@
+/* Pill-style nav links */
+.navbar .nav-link {
+    background-color: rgba(255, 255, 255, 0.12);
+    border-radius: 20px;
+    padding: 5px 16px !important;
+    margin: 0 4px;
+    transition: background-color 0.15s ease;
+}
+
+.navbar .nav-link:hover {
+    background-color: rgba(255, 255, 255, 0.25);
+}
+
+.navbar .nav-link.active {
+    background-color: rgba(255, 255, 255, 0.35);
+    font-weight: 600;
+}
