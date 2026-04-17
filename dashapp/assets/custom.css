@@ -1,3 +1,8 @@
+body {
+    background-color: #2b2b2b;
+    color: #d4d4d4;
+}
+
 /* Pill-style nav links */
 .navbar .nav-link {
     background-color: rgba(255, 255, 255, 0.12);

@@ -5,7 +5,7 @@ import dash_bootstrap_components as dbc
 app = dash.Dash(
     __name__,
     use_pages=True,
-    external_stylesheets=[dbc.themes.FLATLY],
+    external_stylesheets=[dbc.themes.DARKLY],
     suppress_callback_exceptions=True,
 )
 
@@ -24,7 +24,7 @@ navbar = dbc.Navbar(
             id="navbar-collapse", navbar=True,
         ),
     ], fluid=True),
-    color="primary", dark=True, sticky="top",
+    color="#2b2b2b", dark=True, sticky="top",
 )
 
 app.layout = html.Div([
@@ -45,3 +45,4 @@ def toggle_navbar(n, is_open):
 
 if __name__ == "__main__":
     app.run(debug=True)
+
