@@ -11,6 +11,8 @@ Usage:
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from scipy.cluster.hierarchy import linkage, leaves_list, optimal_leaf_ordering, dendrogram
+from scipy.spatial.distance import pdist
 
 from components.theme import TEMPLATE, TEXT_COLOR, GRID_COLOR, CHART_HEIGHT
 
@@ -36,15 +38,20 @@ def build_heatmap(all_deltas: pd.DataFrame) -> go.Figure:
 
     divergence = (en_avg - lr_avg).abs()
 
-    # Sort columns by total disagreement (most disagreed features on the left)
-    col_order = divergence.sum().sort_values(ascending=False).index
-    divergence = divergence[col_order]
+    # Cluster columns (features) independently
+    col_dist = pdist(divergence.values.T, metric="euclidean")
+    col_linkage = optimal_leaf_ordering(linkage(col_dist, method="ward"), col_dist)
+    col_order_idx = leaves_list(col_linkage)
 
-    # Sort rows by total disagreement (most disagreed patients at the top)
-    divergence = divergence.loc[divergence.sum(axis=1).sort_values(ascending=True).index]
+    # Cluster rows (patients) independently
+    row_dist = pdist(divergence.values, metric="euclidean")
+    row_linkage = optimal_leaf_ordering(linkage(row_dist, method="ward"), row_dist)
+    row_order_idx = leaves_list(row_linkage)
+
+    divergence = divergence.iloc[row_order_idx, :].iloc[:, col_order_idx]
 
     # Clean feature labels: "acpa_norm" → "acpa"
-    feature_labels = [col.replace("_norm", "") for col in col_order]
+    feature_labels = [col.replace("_norm", "") for col in divergence.columns]
 
     fig = go.Figure(
         data=go.Heatmap(
@@ -69,7 +76,7 @@ def build_heatmap(all_deltas: pd.DataFrame) -> go.Figure:
             xaxis=dict(title="", tickangle=-45),
             yaxis=dict(
                 title=dict(
-                    text="Patients (Least to most model disagreement)",
+                    text="Patients (Hierarchically clustered)",
                     standoff=10,
                 ),
                 showticklabels=False,
@@ -226,6 +233,90 @@ def build_bar(
             title=f"Patient {patient}: Counterfactual changes to {feature}",
             yaxis=dict(title=f"{feature} value"),
         ),
+    )
+
+    return fig
+
+
+def build_col_dendrogram(all_deltas: pd.DataFrame) -> go.Figure:
+    """
+    Column (feature) dendrogram matching the heatmap's cluster ordering.
+    Intended to sit below the heatmap for experimental review.
+    """
+    norm_cols = [col for col in all_deltas.columns if col.endswith("_norm")]
+
+    lr_avg = (all_deltas[all_deltas["model"] == "logistic_regression"]
+              .groupby("patient_idx")[norm_cols].mean())
+    en_avg = (all_deltas[all_deltas["model"] == "elastic_net"]
+              .groupby("patient_idx")[norm_cols].mean())
+    shared = lr_avg.index.intersection(en_avg.index)
+    divergence = (en_avg.loc[shared] - lr_avg.loc[shared]).abs()
+
+    col_dist = pdist(divergence.values.T, metric="euclidean")
+    col_linkage = optimal_leaf_ordering(linkage(col_dist, method="ward"), col_dist)
+
+    dend = dendrogram(col_linkage, no_plot=True)
+
+    n = len(dend["leaves"])
+    feature_labels = [norm_cols[i].replace("_norm", "") for i in dend["leaves"]]
+    leaf_x = [10 * i + 5 for i in range(n)]
+
+    fig = go.Figure()
+    for xs, ys in zip(dend["icoord"], dend["dcoord"]):
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys,
+            mode="lines",
+            line=dict(color=TEXT_COLOR, width=1),
+            showlegend=False,
+        ))
+
+    fig.update_layout(
+        template=TEMPLATE,
+        height=600,
+        margin=dict(t=20, b=80, l=60, r=10),
+        title="Feature dendrogram",
+        xaxis=dict(tickvals=leaf_x, ticktext=feature_labels, tickangle=-45),
+        yaxis=dict(title="Distance"),
+    )
+
+    return fig
+
+
+def build_row_dendrogram(all_deltas: pd.DataFrame) -> go.Figure:
+    """
+    Row (patient) dendrogram matching the heatmap's cluster ordering.
+    Intended to sit below the feature dendrogram for experimental review.
+    """
+    norm_cols = [col for col in all_deltas.columns if col.endswith("_norm")]
+
+    lr_avg = (all_deltas[all_deltas["model"] == "logistic_regression"]
+              .groupby("patient_idx")[norm_cols].mean())
+    en_avg = (all_deltas[all_deltas["model"] == "elastic_net"]
+              .groupby("patient_idx")[norm_cols].mean())
+    shared = lr_avg.index.intersection(en_avg.index)
+    divergence = (en_avg.loc[shared] - lr_avg.loc[shared]).abs()
+
+    row_dist = pdist(divergence.values, metric="euclidean")
+    row_linkage = optimal_leaf_ordering(linkage(row_dist, method="ward"), row_dist)
+
+    dend = dendrogram(row_linkage, no_plot=True)
+
+    fig = go.Figure()
+    for xs, ys in zip(dend["icoord"], dend["dcoord"]):
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys,
+            mode="lines",
+            line=dict(color=TEXT_COLOR, width=1),
+            showlegend=False,
+        ))
+
+    fig.update_layout(
+        template=TEMPLATE,
+        height=900,
+        margin=dict(t=20, b=40, l=60, r=10),
+        title="Patient dendrogram",
+        xaxis=dict(showticklabels=False, title="Patients"),
+        yaxis=dict(title="Distance"),
     )
 
     return fig

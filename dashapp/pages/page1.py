@@ -6,7 +6,7 @@ import dash_bootstrap_components as dbc
 import pandas as pd
 from pathlib import Path
 
-from components.figures import build_heatmap, build_scatter
+from components.figures import build_heatmap, build_scatter, build_col_dendrogram, build_row_dendrogram
 from components.theme import TEMPLATE, CHART_HEIGHT
 
 dash.register_page(
@@ -61,6 +61,18 @@ def layout():
             dbc.Col([
                 dcc.Graph(id="scatter", figure=_placeholder_scatter()),
             ], width=5),
+        ]),
+
+        dbc.Row([
+            dbc.Col([
+                dcc.Graph(id="col-dendrogram", figure=build_col_dendrogram(all_deltas)),
+            ], width=7),
+        ]),
+
+        dbc.Row([
+            dbc.Col([
+                dcc.Graph(id="row-dendrogram", figure=build_row_dendrogram(all_deltas)),
+            ], width=12),
         ]),
     ], className="pt-0", fluid=True)
 
