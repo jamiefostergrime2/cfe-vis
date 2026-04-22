@@ -5,7 +5,10 @@ Each function takes data in and returns a Plotly figure. No Dash logic,
 no callbacks — just data in, figure out.
 
 Usage:
-    from components.figures import build_heatmap, build_scatter, build_bar
+    from components.figures import (
+        build_heatmap, build_scatter, build_bar,
+        precompute_boundary_data, assemble_boundary_fig,
+    )
 """
 
 import numpy as np
@@ -232,7 +235,7 @@ def build_bar(
     return fig
 
 
-def build_boundary_view(
+def precompute_boundary_data(
     all_deltas: pd.DataFrame,
     X: pd.DataFrame,
     lr_pipeline,
@@ -240,16 +243,16 @@ def build_boundary_view(
     feature_x: str | None = None,
     feature_y: str | None = None,
     grid_n: int = 60,
-) -> go.Figure:
+) -> dict:
     """
-    Side-by-side decision boundary plots for LR and EN in original feature space.
+    Run all expensive computation (grid prediction, CFE aggregation) once.
 
-    Shows all patients as original points with arrows to their mean CFE destination.
-    The two axes are the top-2 most-disagreed features (by normalised delta divergence);
-    all other features are held at their population median when computing the boundary.
+    Returns a plain dict consumed by assemble_boundary_fig. Separating this
+    from the figure builder means model calls happen only at page load, not
+    on every user interaction.
     """
 
-    # --- Auto-pick top-2 features by model disagreement (same logic as build_heatmap) ---
+    # Auto-pick top-2 features by model disagreement (same logic as build_heatmap)
     if feature_x is None or feature_y is None:
         norm_cols = [c for c in all_deltas.columns if c.endswith("_norm")]
         lr_avg = (all_deltas[all_deltas["model"] == "logistic_regression"]
@@ -262,7 +265,7 @@ def build_boundary_view(
         feature_x = top2[0].replace("_norm", "")
         feature_y = top2[1].replace("_norm", "")
 
-    # --- Build 60×60 prediction grid in original feature units ---
+    # Build grid in original feature units — all other features at population median
     margin = 0.05
     x_min, x_max = X[feature_x].min(), X[feature_x].max()
     y_min, y_max = X[feature_y].min(), X[feature_y].max()
@@ -283,12 +286,12 @@ def build_boundary_view(
     z_lr = lr_pipeline.predict_proba(grid_df)[:, 1].reshape(grid_n, grid_n)
     z_en = en_pipeline.predict_proba(grid_df)[:, 1].reshape(grid_n, grid_n)
 
-    # --- Compute patient original points and mean CFE endpoints ---
+    # Patient original points and mean CFE endpoints
     patients = np.sort(all_deltas["patient_idx"].unique())
     orig_x = X.loc[patients, feature_x].values
     orig_y = X.loc[patients, feature_y].values
 
-    def _cfe_delta(model_str, feat):
+    def _mean_cfe_delta(model_str: str, feat: str) -> np.ndarray:
         return (
             all_deltas[all_deltas["model"] == model_str]
             .groupby("patient_idx")[f"{feat}_raw"].mean()
@@ -296,12 +299,12 @@ def build_boundary_view(
             .values
         )
 
-    lr_cfe_x = orig_x + _cfe_delta("logistic_regression", feature_x)
-    lr_cfe_y = orig_y + _cfe_delta("logistic_regression", feature_y)
-    en_cfe_x = orig_x + _cfe_delta("elastic_net", feature_x)
-    en_cfe_y = orig_y + _cfe_delta("elastic_net", feature_y)
+    lr_cfe_x = orig_x + _mean_cfe_delta("logistic_regression", feature_x)
+    lr_cfe_y = orig_y + _mean_cfe_delta("logistic_regression", feature_y)
+    en_cfe_x = orig_x + _mean_cfe_delta("elastic_net", feature_x)
+    en_cfe_y = orig_y + _mean_cfe_delta("elastic_net", feature_y)
 
-    # --- Shared axis range: union of all points + grid bounds ---
+    # Shared axis range: union of all finite points + grid bounds
     all_x = np.concatenate([orig_x, lr_cfe_x, en_cfe_x, [x_vals[0], x_vals[-1]]])
     all_y = np.concatenate([orig_y, lr_cfe_y, en_cfe_y, [y_vals[0], y_vals[-1]]])
     finite_x = all_x[np.isfinite(all_x)]
@@ -309,106 +312,227 @@ def build_boundary_view(
     x_range = [float(finite_x.min()) * 0.98, float(finite_x.max()) * 1.02]
     y_range = [float(finite_y.min()) * 0.98, float(finite_y.max()) * 1.02]
 
-    # --- NaN-separated arrow traces (original → CFE endpoint) ---
-    def _arrow_trace(ox, oy, cx, cy):
-        xs, ys = [], []
-        for o_xi, o_yi, c_xi, c_yi in zip(ox, oy, cx, cy):
-            xs += [float(o_xi), float(c_xi), None]
-            ys += [float(o_yi), float(c_yi), None]
-        return xs, ys
+    # Original class predictions — used for direction filter (0→1 vs 1→0)
+    lr_preds = lr_pipeline.predict(X.loc[patients]).astype(int)
+    en_preds = en_pipeline.predict(X.loc[patients]).astype(int)
 
-    lr_ax, lr_ay = _arrow_trace(orig_x, orig_y, lr_cfe_x, lr_cfe_y)
-    en_ax, en_ay = _arrow_trace(orig_x, orig_y, en_cfe_x, en_cfe_y)
+    return dict(
+        feature_x=feature_x,
+        feature_y=feature_y,
+        x_vals=x_vals,
+        y_vals=y_vals,
+        z_lr=z_lr,
+        z_en=z_en,
+        patients=patients,
+        orig_x=orig_x,
+        orig_y=orig_y,
+        lr_cfe_x=lr_cfe_x,
+        lr_cfe_y=lr_cfe_y,
+        en_cfe_x=en_cfe_x,
+        en_cfe_y=en_cfe_y,
+        lr_preds=lr_preds,
+        en_preds=en_preds,
+        x_range=x_range,
+        y_range=y_range,
+    )
 
-    # --- Assemble figure ---
+
+def _direction_mask(preds: np.ndarray, direction: str) -> np.ndarray:
+    if direction == "0→1":
+        return preds == 0
+    if direction == "1→0":
+        return preds == 1
+    return np.ones(len(preds), dtype=bool)
+
+
+def _arrow_segments(
+    ox: np.ndarray,
+    oy: np.ndarray,
+    cx: np.ndarray,
+    cy: np.ndarray,
+    mask: np.ndarray,
+    patients: np.ndarray,
+) -> tuple[list, list, list]:
+    """Build NaN-separated line arrays for patients where mask is True.
+
+    Returns xs, ys, and a parallel customdata list (patient index repeated
+    for origin and destination, None for separators) so click events on line
+    traces carry patient identity.
+    """
+    xs: list = []
+    ys: list = []
+    cdata: list = []
+    for i in range(len(ox)):
+        if mask[i] and np.isfinite(cx[i]) and np.isfinite(cy[i]):
+            p = int(patients[i])
+            xs += [float(ox[i]), float(cx[i]), None]
+            ys += [float(oy[i]), float(cy[i]), None]
+            cdata += [p, p, None]
+    return xs, ys, cdata
+
+
+def _point_opacities(
+    mask: np.ndarray,
+    patients: np.ndarray,
+    selected_patient: int | None,
+    full: float,
+    dim: float,
+) -> list[float]:
+    """Per-point opacity list for a Scatter trace matching the patients array."""
+    result = []
+    for i, p in enumerate(patients):
+        if not mask[i]:
+            result.append(0.0)
+        elif selected_patient is not None and p != selected_patient:
+            result.append(dim)
+        else:
+            result.append(full)
+    return result
+
+
+def _point_sizes(
+    patients: np.ndarray,
+    selected_patient: int | None,
+    normal: int,
+    highlighted: int,
+) -> list[int]:
+    """Per-point size list — highlighted patient gets a larger marker."""
+    if selected_patient is None:
+        return [normal] * len(patients)
+    return [highlighted if p == selected_patient else normal for p in patients]
+
+
+def assemble_boundary_fig(
+        data: dict,
+        show_cfe: bool = False,
+        direction: str = "Both",
+        selected_patient: int | None = None,
+) -> go.Figure:
+    """
+    Build the decision boundary figure from pre-computed data.
+    """
+    feature_x = data["feature_x"]
+    feature_y = data["feature_y"]
+    patients = data["patients"]
+
+    # FIX: Create a single unified mask that only includes patients
+    # where BOTH models agree on the starting prediction direction.
+    unified_mask = _direction_mask(data["lr_preds"], direction) & \
+                   _direction_mask(data["en_preds"], direction)
+
     fig = make_subplots(
         rows=1, cols=2,
-        shared_xaxes=True, shared_yaxes=True,
         subplot_titles=["Logistic Regression", "Elastic Net"],
         horizontal_spacing=0.04,
     )
 
-    for col, (z, ax, ay, cfe_x, cfe_y) in enumerate(
-        [
-            (z_lr, lr_ax, lr_ay, lr_cfe_x, lr_cfe_y),
-            (z_en, en_ax, en_ay, en_cfe_x, en_cfe_y),
-        ],
-        start=1,
+    # Standard hover templates...
+    hover_cfe = "Patient: %{customdata}<br>Value: %{x:.3f}, %{y:.3f}<extra>CFE</extra>"
+    hover_arrow = "Patient: %{customdata}<extra>Arrow</extra>"
+    hover_orig = "Patient: %{customdata}<br>Value: %{x:.3f}, %{y:.3f}<extra>Original</extra>"
+
+    # We iterate through the two models, but use the SAME unified_mask for both
+    for col, (z, cfe_x, cfe_y) in enumerate(
+            [
+                (data["z_lr"], data["lr_cfe_x"], data["lr_cfe_y"]),
+                (data["z_en"], data["en_cfe_x"], data["en_cfe_y"]),
+            ],
+            start=1,
     ):
         show = col == 1
+        orig_x = data["orig_x"]
+        orig_y = data["orig_y"]
 
+        # Find selected patient's positional index
+        sel_pos = None
+        if selected_patient is not None:
+            idxs = np.where(patients == selected_patient)[0]
+            # Use unified_mask to ensure selection only happens if point is visible
+            if idxs.size and unified_mask[idxs[0]]:
+                sel_pos = idxs[0]
+
+        # Background mask for arrows (excludes selected patient)
+        bg_mask = unified_mask.copy()
+        if sel_pos is not None:
+            bg_mask[sel_pos] = False
+
+        bg_xs, bg_ys, bg_cdata = _arrow_segments(orig_x, orig_y, cfe_x, cfe_y, bg_mask, patients)
+
+        if sel_pos is not None:
+            hl_xs = [float(orig_x[sel_pos]), float(cfe_x[sel_pos]), None]
+            hl_ys = [float(orig_y[sel_pos]), float(cfe_y[sel_pos]), None]
+            hl_cdata = [int(selected_patient), int(selected_patient), None]
+        else:
+            hl_xs, hl_ys, hl_cdata = [], [], []
+
+        # Trace 0/5 — Decision boundary
         fig.add_trace(
             go.Contour(
-                x=x_vals,
-                y=y_vals,
-                z=z,
-                contours=dict(
-                    coloring="none",
-                    showlines=True,
-                    start=0.5,
-                    end=0.5,
-                    size=1,
-                ),
+                x=data["x_vals"], y=data["y_vals"], z=z,
+                contours=dict(coloring="none", showlines=True, start=0.5, end=0.5, size=1),
                 line=dict(color="#aaaaaa", width=2, dash="dash"),
-                showscale=False,
-                opacity=0.6,
-                name="Decision boundary",
-                showlegend=show,
-                hoverinfo="skip",
+                showscale=False, opacity=0.6, name="Decision boundary",
+                showlegend=show, hoverinfo="skip",
             ),
             row=1, col=col,
         )
 
+        # Trace 1/6 — Arrow background
         fig.add_trace(
             go.Scatter(
-                x=ax,
-                y=ay,
-                mode="lines",
-                line=dict(color="#888888", width=0.8),
-                opacity=0.5,
-                showlegend=False,
-                hoverinfo="skip",
+                x=bg_xs, y=bg_ys, mode="lines",
+                line=dict(color="#888888", width=0.8), opacity=0.35,
+                customdata=bg_cdata, hovertemplate=hover_arrow,
+                showlegend=False, visible=show_cfe,
             ),
             row=1, col=col,
         )
 
+        # Trace 2/7 — Arrow highlight
         fig.add_trace(
             go.Scatter(
-                x=cfe_x,
-                y=cfe_y,
-                mode="markers",
-                marker=dict(color="#f4a261", size=5, opacity=0.7,
+                x=hl_xs, y=hl_ys, mode="lines",
+                line=dict(color="#ffffff", width=2), opacity=0.9,
+                customdata=hl_cdata, hovertemplate=hover_arrow,
+                showlegend=False, visible=show_cfe and sel_pos is not None,
+            ),
+            row=1, col=col,
+        )
+
+        # Trace 3/8 — CFE destination markers
+        # patients.tolist() forces plain JSON ints; numpy arrays get binary-encoded
+        # by Plotly 6.x, which breaks clickData scalar extraction in Dash.
+        patients_list = patients.tolist()
+        cfe_opacities = _point_opacities(unified_mask, patients, selected_patient, full=0.75, dim=0.1)
+        fig.add_trace(
+            go.Scatter(
+                x=cfe_x, y=cfe_y, mode="markers",
+                marker=dict(color="#f4a261", size=5, opacity=cfe_opacities, line=dict(width=0.5, color="grey")),
+                name="CFE destination", showlegend=show and show_cfe,
+                customdata=patients_list, hovertemplate=hover_cfe, visible=show_cfe,
+            ),
+            row=1, col=col,
+        )
+
+        # Trace 4/9 — Original scatter markers
+        orig_opacities = _point_opacities(unified_mask, patients, selected_patient, full=0.85, dim=0.15)
+        orig_sizes = _point_sizes(patients, selected_patient, normal=6, highlighted=11)
+        orig_colors = ["#ffffff" if (selected_patient is not None and p == selected_patient) else "#d4d4d4" for p in
+                       patients]
+        fig.add_trace(
+            go.Scatter(
+                x=orig_x, y=orig_y, mode="markers",
+                marker=dict(color=orig_colors, size=orig_sizes, opacity=orig_opacities,
                             line=dict(width=0.5, color="grey")),
-                name="CFE destination",
-                showlegend=show,
-                hovertemplate=(
-                    f"{feature_x}: %{{x:.3f}}<br>"
-                    f"{feature_y}: %{{y:.3f}}"
-                    "<extra>CFE</extra>"
-                ),
+                name="Original", showlegend=show, customdata=patients_list, hovertemplate=hover_orig,
             ),
             row=1, col=col,
         )
 
-        fig.add_trace(
-            go.Scatter(
-                x=orig_x,
-                y=orig_y,
-                mode="markers",
-                marker=dict(color="#d4d4d4", size=6, opacity=0.85,
-                            line=dict(width=0.5, color="grey")),
-                name="Original",
-                showlegend=show,
-                customdata=patients,
-                hovertemplate=(
-                    "Patient: %{customdata}<br>"
-                    f"{feature_x}: %{{x:.3f}}<br>"
-                    f"{feature_y}: %{{y:.3f}}"
-                    "<extra>Original</extra>"
-                ),
-            ),
-            row=1, col=col,
-        )
+    fig.update_xaxes(title_text=feature_x, range=data["x_range"], row=1, col=1)
+    fig.update_xaxes(title_text=feature_x, range=data["x_range"], row=1, col=2)
+    fig.update_yaxes(title_text=feature_y, range=data["y_range"], row=1, col=1)
+    fig.update_yaxes(range=data["y_range"], row=1, col=2)
 
     fig.update_layout(
         template=TEMPLATE,
@@ -417,9 +541,10 @@ def build_boundary_view(
         showlegend=True,
         legend=dict(x=1.02, y=1),
         margin=dict(b=80),
+        xaxis2=dict(matches="x"),
+        yaxis2=dict(matches="y"),
+        clickmode="event",
     )
-    fig.update_xaxes(title_text=feature_x, range=x_range)
-    fig.update_yaxes(title_text=feature_y, range=y_range)
 
     fig.add_annotation(
         text="Boundaries computed with all other features held at population median.",
@@ -430,3 +555,19 @@ def build_boundary_view(
     )
 
     return fig
+
+
+def build_boundary_view(
+    all_deltas: pd.DataFrame,
+    X: pd.DataFrame,
+    lr_pipeline,
+    en_pipeline,
+    feature_x: str | None = None,
+    feature_y: str | None = None,
+    grid_n: int = 60,
+) -> go.Figure:
+    """Convenience wrapper: precompute data then assemble the figure."""
+    data = precompute_boundary_data(
+        all_deltas, X, lr_pipeline, en_pipeline, feature_x, feature_y, grid_n
+    )
+    return assemble_boundary_fig(data)
