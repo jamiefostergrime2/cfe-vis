@@ -316,6 +316,15 @@ def precompute_boundary_data(
     lr_preds = lr_pipeline.predict(X.loc[patients]).astype(int)
     en_preds = en_pipeline.predict(X.loc[patients]).astype(int)
 
+    # Individual (unaggregated) CFE positions for the detail subplot
+    orig_x_ser = X[feature_x]
+    orig_y_ser = X[feature_y]
+    indiv = all_deltas[["patient_idx", "model", f"{feature_x}_raw", f"{feature_y}_raw"]].copy()
+    indiv["orig_x"] = indiv["patient_idx"].map(orig_x_ser)
+    indiv["orig_y"] = indiv["patient_idx"].map(orig_y_ser)
+    indiv["cfe_x"] = indiv["orig_x"] + indiv[f"{feature_x}_raw"]
+    indiv["cfe_y"] = indiv["orig_y"] + indiv[f"{feature_y}_raw"]
+
     return dict(
         feature_x=feature_x,
         feature_y=feature_y,
@@ -334,6 +343,7 @@ def precompute_boundary_data(
         en_preds=en_preds,
         x_range=x_range,
         y_range=y_range,
+        indiv_cfe=indiv[["patient_idx", "model", "orig_x", "orig_y", "cfe_x", "cfe_y"]].reset_index(drop=True),
     )
 
 
@@ -420,10 +430,18 @@ def assemble_boundary_fig(
     unified_mask = _direction_mask(data["lr_preds"], direction) & \
                    _direction_mask(data["en_preds"], direction)
 
+    _LR_COLOR = "#2a9d8f"
+    _EN_COLOR = "#e76f51"
+
     fig = make_subplots(
-        rows=1, cols=2,
-        subplot_titles=["Logistic Regression", "Elastic Net"],
+        rows=2, cols=2,
+        subplot_titles=[
+            "Logistic Regression", "Elastic Net",
+            "Individual counterfactuals (both models)", "",
+        ],
         horizontal_spacing=0.04,
+        vertical_spacing=0.10,
+        row_heights=[0.5, 0.5],
     )
 
     # Standard hover templates...
@@ -440,6 +458,7 @@ def assemble_boundary_fig(
             start=1,
     ):
         show = col == 1
+        model_color = _LR_COLOR if col == 1 else _EN_COLOR
         orig_x = data["orig_x"]
         orig_y = data["orig_y"]
 
@@ -470,9 +489,9 @@ def assemble_boundary_fig(
             go.Contour(
                 x=data["x_vals"], y=data["y_vals"], z=z,
                 contours=dict(coloring="none", showlines=True, start=0.5, end=0.5, size=1),
-                line=dict(color="#aaaaaa", width=2, dash="dash"),
+                line=dict(color=model_color, width=2, dash="dash"),
                 showscale=False, opacity=0.6, name="Decision boundary",
-                showlegend=show, hoverinfo="skip",
+                showlegend=False, hoverinfo="skip",
             ),
             row=1, col=col,
         )
@@ -508,8 +527,8 @@ def assemble_boundary_fig(
         fig.add_trace(
             go.Scatter(
                 x=cfe_x, y=cfe_y, mode="markers",
-                marker=dict(color="#f4a261", size=cfe_sizes, opacity=cfe_opacities, line=dict(width=0.5, color="grey")),
-                name="CFE destination", showlegend=show and show_cfe,
+                marker=dict(color=model_color, size=cfe_sizes, opacity=cfe_opacities, line=dict(width=0.5, color="grey")),
+                name="CFE destination", showlegend=False,
                 customdata=patients_list, hovertemplate=hover_cfe, visible=show_cfe,
             ),
             row=1, col=col,
@@ -535,22 +554,123 @@ def assemble_boundary_fig(
     fig.update_yaxes(title_text=feature_y, range=data["y_range"], row=1, col=1)
     fig.update_yaxes(range=data["y_range"], row=1, col=2)
 
+    # --- Lower-left subplot: individual CFEs for selected patient ---
+    fig.add_trace(
+        go.Contour(
+            x=data["x_vals"], y=data["y_vals"], z=data["z_lr"],
+            contours=dict(coloring="none", showlines=True, start=0.5, end=0.5, size=1),
+            line=dict(color=_LR_COLOR, width=2, dash="dash"),
+            showscale=False, opacity=0.7, name="LR boundary",
+            showlegend=True, hoverinfo="skip",
+        ),
+        row=2, col=1,
+    )
+    fig.add_trace(
+        go.Contour(
+            x=data["x_vals"], y=data["y_vals"], z=data["z_en"],
+            contours=dict(coloring="none", showlines=True, start=0.5, end=0.5, size=1),
+            line=dict(color=_EN_COLOR, width=2, dash="dash"),
+            showscale=False, opacity=0.7, name="EN boundary",
+            showlegend=True, hoverinfo="skip",
+        ),
+        row=2, col=1,
+    )
+
+    if selected_patient is not None and "indiv_cfe" in data:
+        indiv_df = data["indiv_cfe"]
+        pat_df = indiv_df[indiv_df["patient_idx"] == selected_patient]
+        lr_df = pat_df[pat_df["model"] == "logistic_regression"].dropna(subset=["cfe_x", "cfe_y"])
+        en_df = pat_df[pat_df["model"] == "elastic_net"].dropna(subset=["cfe_x", "cfe_y"])
+
+        if not pat_df.empty:
+            orig_x_pt = float(pat_df["orig_x"].iloc[0])
+            orig_y_pt = float(pat_df["orig_y"].iloc[0])
+
+            if not lr_df.empty:
+                lr_xs, lr_ys = [], []
+                for _, r in lr_df.iterrows():
+                    lr_xs += [orig_x_pt, float(r["cfe_x"]), None]
+                    lr_ys += [orig_y_pt, float(r["cfe_y"]), None]
+                fig.add_trace(
+                    go.Scatter(x=lr_xs, y=lr_ys, mode="lines",
+                               line=dict(color=_LR_COLOR, width=1), opacity=0.4,
+                               showlegend=False, hoverinfo="skip"),
+                    row=2, col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=lr_df["cfe_x"].tolist(), y=lr_df["cfe_y"].tolist(), mode="markers",
+                        marker=dict(color=_LR_COLOR, size=8, line=dict(width=0.5, color="grey")),
+                        name="LR CFE", showlegend=True,
+                        hovertemplate="LR CFE: (%{x:.3f}, %{y:.3f})<extra></extra>",
+                    ),
+                    row=2, col=1,
+                )
+
+            if not en_df.empty:
+                en_xs, en_ys = [], []
+                for _, r in en_df.iterrows():
+                    en_xs += [orig_x_pt, float(r["cfe_x"]), None]
+                    en_ys += [orig_y_pt, float(r["cfe_y"]), None]
+                fig.add_trace(
+                    go.Scatter(x=en_xs, y=en_ys, mode="lines",
+                               line=dict(color=_EN_COLOR, width=1), opacity=0.4,
+                               showlegend=False, hoverinfo="skip"),
+                    row=2, col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=en_df["cfe_x"].tolist(), y=en_df["cfe_y"].tolist(), mode="markers",
+                        marker=dict(color=_EN_COLOR, size=8, line=dict(width=0.5, color="grey")),
+                        name="EN CFE", showlegend=True,
+                        hovertemplate="EN CFE: (%{x:.3f}, %{y:.3f})<extra></extra>",
+                    ),
+                    row=2, col=1,
+                )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=[orig_x_pt], y=[orig_y_pt], mode="markers",
+                    marker=dict(color="#ffffff", size=11, line=dict(width=0.5, color="grey")),
+                    showlegend=False, hoverinfo="skip",
+                ),
+                row=2, col=1,
+            )
+    else:
+        fig.add_annotation(
+            text="Select a patient above to see their individual counterfactuals.",
+            xref="x3 domain", yref="y3 domain",
+            x=0.5, y=0.5,
+            showarrow=False,
+            font=dict(color=TEXT_COLOR, size=12),
+        )
+
+    fig.update_xaxes(title_text=feature_x, range=data["x_range"], row=2, col=1)
+    fig.update_yaxes(title_text=feature_y, range=data["y_range"], row=2, col=1)
+    fig.update_xaxes(visible=False, row=2, col=2)
+    fig.update_yaxes(visible=False, row=2, col=2)
+
     fig.update_layout(
         template=TEMPLATE,
-        height=CHART_HEIGHT,
+        height=int(CHART_HEIGHT * 1.75),
         title=f"Decision boundaries: {feature_x} vs {feature_y}",
         showlegend=True,
         legend=dict(x=1.02, y=1),
-        margin=dict(b=80),
+        margin=dict(b=100),
         xaxis2=dict(matches="x"),
         yaxis2=dict(matches="y"),
+        xaxis3=dict(matches="x"),
+        yaxis3=dict(matches="y"),
         clickmode="event",
     )
+
+    fig.layout.annotations[0].font.color = _LR_COLOR
+    fig.layout.annotations[1].font.color = _EN_COLOR
 
     fig.add_annotation(
         text="Boundaries computed with all other features held at population median.",
         xref="paper", yref="paper",
-        x=0.5, y=-0.12,
+        x=0.5, y=-0.07,
         showarrow=False,
         font=dict(color=TEXT_COLOR, size=11),
     )
