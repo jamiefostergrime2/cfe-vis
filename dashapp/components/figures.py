@@ -504,10 +504,11 @@ def assemble_boundary_fig(
         # by Plotly 6.x, which breaks clickData scalar extraction in Dash.
         patients_list = patients.tolist()
         cfe_opacities = _point_opacities(unified_mask, patients, selected_patient, full=0.75, dim=0.1)
+        cfe_sizes = _point_sizes(patients, selected_patient, normal=5, highlighted=11)
         fig.add_trace(
             go.Scatter(
                 x=cfe_x, y=cfe_y, mode="markers",
-                marker=dict(color="#f4a261", size=5, opacity=cfe_opacities, line=dict(width=0.5, color="grey")),
+                marker=dict(color="#f4a261", size=cfe_sizes, opacity=cfe_opacities, line=dict(width=0.5, color="grey")),
                 name="CFE destination", showlegend=show and show_cfe,
                 customdata=patients_list, hovertemplate=hover_cfe, visible=show_cfe,
             ),
