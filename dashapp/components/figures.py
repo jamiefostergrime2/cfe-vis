@@ -417,6 +417,7 @@ def assemble_boundary_fig(
         show_cfe: bool = False,
         direction: str = "Both",
         selected_patient: int | None = None,
+        pca_results: pd.DataFrame | None = None,
 ) -> go.Figure:
     """
     Build the decision boundary figure from pre-computed data.
@@ -554,6 +555,25 @@ def assemble_boundary_fig(
     fig.update_yaxes(title_text=feature_y, range=data["y_range"], row=1, col=1)
     fig.update_yaxes(range=data["y_range"], row=1, col=2)
 
+    # Dummy trace: single legend entry representing both models' CFE destinations.
+    # Horizontal gradient gives a left=LR, right=EN split appearance in the legend swatch.
+    fig.add_trace(
+        go.Scatter(
+            x=[None], y=[None],
+            mode="markers",
+            marker=dict(
+                symbol="circle",
+                size=6,
+                color=_LR_COLOR,
+                gradient=dict(type="horizontal", color=_EN_COLOR),
+                line=dict(width=0.5, color="grey"),
+            ),
+            name="Counterfactual",
+            showlegend=True,
+        ),
+        row=1, col=1,
+    )
+
     # --- Lower-left subplot: individual CFEs for selected patient ---
     fig.add_trace(
         go.Contour(
@@ -647,8 +667,73 @@ def assemble_boundary_fig(
 
     fig.update_xaxes(title_text=feature_x, range=data["x_range"], row=2, col=1)
     fig.update_yaxes(title_text=feature_y, range=data["y_range"], row=2, col=1)
-    fig.update_xaxes(visible=False, row=2, col=2)
-    fig.update_yaxes(visible=False, row=2, col=2)
+
+    if pca_results is not None:
+        n_features = sum(1 for c in pca_results.columns if c.startswith("pc1_v"))
+        lr_pca = pca_results[pca_results["model"] == "logistic_regression"].set_index("patient_idx")
+        en_pca = pca_results[pca_results["model"] == "elastic_net"].set_index("patient_idx")
+        shared = lr_pca.index.intersection(en_pca.index)
+        lr_pca = lr_pca.loc[shared]
+        en_pca = en_pca.loc[shared]
+
+        pc1_cols = [f"pc1_v{i}" for i in range(n_features)]
+        mean_cols = [f"mean_v{i}" for i in range(n_features)]
+
+        lr_pc1 = lr_pca[pc1_cols].values
+        en_pc1 = en_pca[pc1_cols].values
+        lr_mean = lr_pca[mean_cols].values
+        en_mean = en_pca[mean_cols].values
+
+        dots = np.clip(np.abs((lr_pc1 * en_pc1).sum(axis=1)), -1.0, 1.0)
+        pc1_angle = np.degrees(np.arccos(dots))
+        pc1_ratio_diff = lr_pca["pc1_ratio"].values - en_pca["pc1_ratio"].values
+        centre_distance = np.linalg.norm(lr_mean - en_mean, axis=1)
+        reliability = np.minimum(lr_pca["pc1_ratio"].values, en_pca["pc1_ratio"].values)
+
+        size_norm = centre_distance / (centre_distance.max() or 1.0)
+        marker_sizes = (4 + size_norm * 16).tolist()
+        marker_opacity = (0.3 + 0.7 * reliability).tolist()
+
+        x_max = max(abs(float(pc1_ratio_diff.min())), abs(float(pc1_ratio_diff.max())))
+
+        fig.add_trace(
+            go.Scatter(
+                x=pc1_ratio_diff.tolist(),
+                y=pc1_angle.tolist(),
+                mode="markers",
+                marker=dict(
+                    size=marker_sizes,
+                    color="#d4d4d4",
+                    opacity=marker_opacity,
+                    line=dict(width=0.5, color="grey"),
+                ),
+                customdata=shared.tolist(),
+                hovertemplate=(
+                    "Patient: %{customdata}<br>"
+                    "PC1 ratio diff (LR−EN): %{x:.3f}<br>"
+                    "PC1 angle: %{y:.1f}°"
+                    "<extra></extra>"
+                ),
+                showlegend=False,
+            ),
+            row=2, col=2,
+        )
+        fig.update_xaxes(
+            title_text="← EN more focused   |   LR more focused →",
+            range=[-x_max * 1.1, x_max * 1.1],
+            zeroline=True,
+            zerolinecolor=GRID_COLOR,
+            zerolinewidth=1,
+            row=2, col=2,
+        )
+        fig.update_yaxes(
+            title_text="PC1 angle (degrees)",
+            range=[0, 92],
+            row=2, col=2,
+        )
+    else:
+        fig.update_xaxes(visible=False, row=2, col=2)
+        fig.update_yaxes(visible=False, row=2, col=2)
 
     fig.update_layout(
         template=TEMPLATE,

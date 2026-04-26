@@ -28,6 +28,9 @@ DATA_PATH = DATA_DIR / "a.pkl.gz"
 CACHE_LR = DATA_DIR / "cfe_batch_lr.pkl"
 CACHE_EN = DATA_DIR / "cfe_batch_en.pkl"
 
+CACHE_LR_20 = DATA_DIR / "cfe_batch_lr_20.pkl"
+CACHE_EN_20 = DATA_DIR / "cfe_batch_en_20.pkl"
+
 
 def load_data():
     """
@@ -164,6 +167,32 @@ def print_summary(cfe_lr: list, cfe_en: list) -> None:
     print(f"  Both succeeded : {both_success}/{n} ({both_success/n:.1%})")
 
 
+def generate_20_cfe_batch() -> None:
+    """Generate and cache 20-CFE batches for both models."""
+    print("Loading data and models...")
+    pipeline_lr, pipeline_en, df, feature_cols = load_data()
+    X = df[feature_cols]
+
+    print("Building DiCE explainers...")
+    exp_lr, exp_en = build_dice_objects(df, pipeline_lr, pipeline_en)
+
+    print("Logistic Regression (20 CFEs):")
+    cfe_lr = load_cache(CACHE_LR_20)
+    if cfe_lr is None:
+        print("  Generating...")
+        cfe_lr = generate_batch_cfe(exp_lr, X, feature_cols, CACHE_LR_20, total_cfs=20)
+        print(f"  Done. {sum(r is not None for r in cfe_lr)}/{len(cfe_lr)} succeeded.")
+
+    print("Elastic Net (20 CFEs):")
+    cfe_en = load_cache(CACHE_EN_20)
+    if cfe_en is None:
+        print("  Generating...")
+        cfe_en = generate_batch_cfe(exp_en, X, feature_cols, CACHE_EN_20, total_cfs=20)
+        print(f"  Done. {sum(r is not None for r in cfe_en)}/{len(cfe_en)} succeeded.")
+
+    print_summary(cfe_lr, cfe_en)
+
+
 def main() -> None:
     print("Loading data and models...")
     pipeline_lr, pipeline_en, df, feature_cols = load_data()
@@ -189,6 +218,9 @@ def main() -> None:
         print(f"  Done. {sum(r is not None for r in cfe_en)}/{len(cfe_en)} succeeded.")
 
     print_summary(cfe_lr, cfe_en)
+
+    print("\n20-CFE batch:")
+    generate_20_cfe_batch()
 
 
 if __name__ == "__main__":

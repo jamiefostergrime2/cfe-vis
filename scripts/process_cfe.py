@@ -25,8 +25,12 @@ SETUP_JSON_PATH = MODELS_DIR / "a-lr.json"
 CACHE_LR = DATA_DIR / "cfe_batch_lr.pkl"
 CACHE_EN = DATA_DIR / "cfe_batch_en.pkl"
 
+CACHE_LR_20 = DATA_DIR / "cfe_batch_lr_20.pkl"
+CACHE_EN_20 = DATA_DIR / "cfe_batch_en_20.pkl"
+
 OUTPUT_PATH = DATA_DIR / "all_deltas.parquet"
 X_OUTPUT_PATH = DATA_DIR / "X.parquet"
+PCA_OUTPUT_PATH = DATA_DIR / "cfe_pca_results.parquet"
 
 
 def load_data() -> tuple[pd.DataFrame, list[str]]:
@@ -118,6 +122,63 @@ def compute_normalised_deltas(
     return pd.DataFrame(rows)
 
 
+def compute_pca_results(
+    cfe_lr_20: list,
+    cfe_en_20: list,
+    feature_cols: list[str],
+) -> pd.DataFrame:
+    """
+    Robust z-score all 20-CFE data (pooled across models/patients), then run
+    PCA per (patient, model) on the 20×12 standardised matrix.
+
+    Returns long-format DataFrame: one row per (patient_idx, model).
+    """
+    from sklearn.decomposition import PCA
+    from scipy.stats import iqr
+
+    all_cfe_rows = []
+    for results in [cfe_lr_20, cfe_en_20]:
+        for cfe_list in results:
+            if cfe_list is None:
+                continue
+            for cf_arr in cfe_list:
+                all_cfe_rows.append(cf_arr)
+    pool = np.array(all_cfe_rows)
+    global_median = np.median(pool, axis=0)
+    global_iqr = iqr(pool, axis=0)
+    global_iqr[global_iqr == 0] = 1.0
+
+    rows = []
+    for model_name, cfe_results in [
+        ("logistic_regression", cfe_lr_20),
+        ("elastic_net", cfe_en_20),
+    ]:
+        for patient_idx, cfe_list in enumerate(cfe_results):
+            if cfe_list is None:
+                continue
+
+            mat = np.array(cfe_list)
+            z = (mat - global_median) / global_iqr
+
+            pca = PCA(n_components=1)
+            pca.fit(z)
+            pc1 = pca.components_[0]
+            pc1_ratio = float(pca.explained_variance_ratio_[0])
+            mean_vec = z.mean(axis=0)
+
+            row = {
+                "patient_idx": patient_idx,
+                "model": model_name,
+                "pc1_ratio": pc1_ratio,
+            }
+            for i in range(len(feature_cols)):
+                row[f"pc1_v{i}"] = float(pc1[i])
+                row[f"mean_v{i}"] = float(mean_vec[i])
+            rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
 def main() -> None:
     print("Loading dataset...")
     X, feature_cols = load_data()
@@ -146,6 +207,19 @@ def main() -> None:
 
     X.to_parquet(X_OUTPUT_PATH, engine="fastparquet", index=False)
     print(f"  Saved to {X_OUTPUT_PATH}")
+
+    print("Loading 20-CFE caches for PCA...")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cfe_lr_20 = load_cache(CACHE_LR_20)
+        cfe_en_20 = load_cache(CACHE_EN_20)
+
+    print("Computing PCA results...")
+    pca_results = compute_pca_results(cfe_lr_20, cfe_en_20, feature_cols)
+    str_cols = pca_results.select_dtypes(exclude="number").columns
+    pca_results[str_cols] = pca_results[str_cols].astype(object)
+    pca_results.to_parquet(PCA_OUTPUT_PATH, engine="fastparquet", index=False)
+    print(f"  Saved to {PCA_OUTPUT_PATH}")
 
 
 if __name__ == "__main__":

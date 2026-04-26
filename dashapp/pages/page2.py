@@ -20,6 +20,7 @@ MODELS_DIR = Path(__file__).resolve().parent.parent.parent / "models"
 
 all_deltas = pd.read_parquet(DATA_DIR / "all_deltas.parquet", engine="fastparquet")
 X = pd.read_parquet(DATA_DIR / "X.parquet", engine="fastparquet")
+pca_results = pd.read_parquet(DATA_DIR / "cfe_pca_results.parquet", engine="fastparquet")
 lr_pipeline = joblib.load(MODELS_DIR / "a-lr.pkl")
 en_pipeline = joblib.load(MODELS_DIR / "a-en.pkl")
 
@@ -60,7 +61,7 @@ def layout():
             ], width="auto", className="d-flex align-items-center ms-3"),
         ], className="mb-2 align-items-center"),
 
-        dcc.Graph(id="p2-boundary-graph", figure=assemble_boundary_fig(_DATA)),
+        dcc.Graph(id="p2-boundary-graph", figure=assemble_boundary_fig(_DATA, pca_results=pca_results)),
 
     ], fluid=True, className="pt-0")
 
@@ -89,5 +90,5 @@ def update_boundary(cfe_n_clicks, direction, click_data, selected_patient):
             clicked = int(patient_pts[0]["customdata"])
             new_selected = None if clicked == selected_patient else clicked
 
-    fig = assemble_boundary_fig(_DATA, show_cfe, direction, new_selected)
+    fig = assemble_boundary_fig(_DATA, show_cfe, direction, new_selected, pca_results)
     return fig, new_selected, btn_text
