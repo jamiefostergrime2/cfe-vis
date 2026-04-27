@@ -11,6 +11,7 @@ import pickle
 import warnings
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
 
@@ -126,10 +127,16 @@ def compute_pca_results(
     cfe_lr_20: list,
     cfe_en_20: list,
     feature_cols: list[str],
+    lr_pipeline,
+    en_pipeline,
+    X: pd.DataFrame,
 ) -> pd.DataFrame:
     """
     Robust z-score all 20-CFE data (pooled across models/patients), then run
     PCA per (patient, model) on the 20×12 standardised matrix.
+
+    Also computes mean_confidence: average predict_proba for the target
+    (flipped) class across each model's 20 CFEs for that patient.
 
     Returns long-format DataFrame: one row per (patient_idx, model).
     """
@@ -149,9 +156,9 @@ def compute_pca_results(
     global_iqr[global_iqr == 0] = 1.0
 
     rows = []
-    for model_name, cfe_results in [
-        ("logistic_regression", cfe_lr_20),
-        ("elastic_net", cfe_en_20),
+    for model_name, cfe_results, pipeline in [
+        ("logistic_regression", cfe_lr_20, lr_pipeline),
+        ("elastic_net", cfe_en_20, en_pipeline),
     ]:
         for patient_idx, cfe_list in enumerate(cfe_results):
             if cfe_list is None:
@@ -166,10 +173,18 @@ def compute_pca_results(
             pc1_ratio = float(pca.explained_variance_ratio_[0])
             mean_vec = z.mean(axis=0)
 
+            # Mean confidence: avg predict_proba for the flipped class across 20 CFEs
+            orig_pred = int(pipeline.predict(X.iloc[[patient_idx]])[0])
+            target_class = 1 - orig_pred
+            cfe_df = pd.DataFrame(mat, columns=feature_cols)
+            proba = pipeline.predict_proba(cfe_df)[:, target_class]
+            mean_confidence = float(proba.mean())
+
             row = {
                 "patient_idx": patient_idx,
                 "model": model_name,
                 "pc1_ratio": pc1_ratio,
+                "mean_confidence": mean_confidence,
             }
             for i in range(len(feature_cols)):
                 row[f"pc1_v{i}"] = float(pc1[i])
@@ -213,9 +228,11 @@ def main() -> None:
         warnings.simplefilter("ignore")
         cfe_lr_20 = load_cache(CACHE_LR_20)
         cfe_en_20 = load_cache(CACHE_EN_20)
+        lr_pipeline = joblib.load(MODELS_DIR / "a-lr.pkl")
+        en_pipeline = joblib.load(MODELS_DIR / "a-en.pkl")
 
     print("Computing PCA results...")
-    pca_results = compute_pca_results(cfe_lr_20, cfe_en_20, feature_cols)
+    pca_results = compute_pca_results(cfe_lr_20, cfe_en_20, feature_cols, lr_pipeline, en_pipeline, X)
     str_cols = pca_results.select_dtypes(exclude="number").columns
     pca_results[str_cols] = pca_results[str_cols].astype(object)
     pca_results.to_parquet(PCA_OUTPUT_PATH, engine="fastparquet", index=False)

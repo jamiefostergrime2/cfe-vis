@@ -23,12 +23,15 @@ X = pd.read_parquet(DATA_DIR / "X.parquet", engine="fastparquet")
 pca_results = pd.read_parquet(DATA_DIR / "cfe_pca_results.parquet", engine="fastparquet")
 lr_pipeline = joblib.load(MODELS_DIR / "a-lr.pkl")
 en_pipeline = joblib.load(MODELS_DIR / "a-en.pkl")
+batch_lr = joblib.load(DATA_DIR / "cfe_batch_lr_20.pkl")
+batch_en = joblib.load(DATA_DIR / "cfe_batch_en_20.pkl")
 
 # Expensive computation once at import time — callbacks only call the fast assembler
-_DATA = precompute_boundary_data(all_deltas, X, lr_pipeline, en_pipeline)
+_DATA = precompute_boundary_data(all_deltas, X, lr_pipeline, en_pipeline, batch_lr=batch_lr, batch_en=batch_en)
 
-# Traces with patient customdata: arrows (1,2,6,7), CFE markers (3,8), originals (4,9)
-_PATIENT_TRACE_INDICES = {1, 2, 3, 4, 6, 7, 8, 9}
+# Traces with patient customdata: arrows (1,2,6,7), CFE markers (3,8), originals (4,9),
+# PCA scatter bg (13) and highlight (14)
+_PATIENT_TRACE_INDICES = {1, 2, 3, 4, 6, 7, 8, 9, 13, 14}
 
 
 def layout():
@@ -61,7 +64,23 @@ def layout():
             ], width="auto", className="d-flex align-items-center ms-3"),
         ], className="mb-2 align-items-center"),
 
-        dcc.Graph(id="p2-boundary-graph", figure=assemble_boundary_fig(_DATA, pca_results=pca_results)),
+        dbc.Row([
+            dbc.Col([
+                dbc.Label("Individual CFEs", className="fw-bold mb-2", style={"fontSize": "0.8rem"}),
+                dbc.RadioItems(
+                    id="p2-indiv-model-filter",
+                    options=[
+                        {"label": "Both", "value": "Both"},
+                        {"label": "LR", "value": "LR"},
+                        {"label": "EN", "value": "EN"},
+                    ],
+                    value="Both",
+                ),
+            ], width="auto", className="d-flex flex-column justify-content-center pe-3 ps-2"),
+            dbc.Col([
+                dcc.Graph(id="p2-boundary-graph", figure=assemble_boundary_fig(_DATA, pca_results=pca_results)),
+            ]),
+        ], className="g-0 align-items-center"),
 
     ], fluid=True, className="pt-0")
 
@@ -73,9 +92,10 @@ def layout():
     Input("p2-cfe-toggle", "n_clicks"),
     Input("p2-direction-filter", "value"),
     Input("p2-boundary-graph", "clickData"),
+    Input("p2-indiv-model-filter", "value"),
     State("p2-selected-patient", "data"),
 )
-def update_boundary(cfe_n_clicks, direction, click_data, selected_patient):
+def update_boundary(cfe_n_clicks, direction, click_data, indiv_model, selected_patient):
     show_cfe = (cfe_n_clicks or 0) % 2 == 1
     btn_text = "Hide Counterfactuals" if show_cfe else "Show Counterfactuals"
 
@@ -90,5 +110,5 @@ def update_boundary(cfe_n_clicks, direction, click_data, selected_patient):
             clicked = int(patient_pts[0]["customdata"])
             new_selected = None if clicked == selected_patient else clicked
 
-    fig = assemble_boundary_fig(_DATA, show_cfe, direction, new_selected, pca_results)
+    fig = assemble_boundary_fig(_DATA, show_cfe, direction, new_selected, pca_results, indiv_model)
     return fig, new_selected, btn_text

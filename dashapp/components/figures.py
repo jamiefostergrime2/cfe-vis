@@ -243,6 +243,8 @@ def precompute_boundary_data(
     feature_x: str | None = None,
     feature_y: str | None = None,
     grid_n: int = 60,
+    batch_lr: list | None = None,
+    batch_en: list | None = None,
 ) -> dict:
     """
     Run all expensive computation (grid prediction, CFE aggregation) once.
@@ -286,23 +288,38 @@ def precompute_boundary_data(
     z_lr = lr_pipeline.predict_proba(grid_df)[:, 1].reshape(grid_n, grid_n)
     z_en = en_pipeline.predict_proba(grid_df)[:, 1].reshape(grid_n, grid_n)
 
-    # Patient original points and mean CFE endpoints
+    # Patient original points
     patients = np.sort(all_deltas["patient_idx"].unique())
     orig_x = X.loc[patients, feature_x].values
     orig_y = X.loc[patients, feature_y].values
 
-    def _mean_cfe_delta(model_str: str, feat: str) -> np.ndarray:
-        return (
-            all_deltas[all_deltas["model"] == model_str]
-            .groupby("patient_idx")[f"{feat}_raw"].mean()
-            .reindex(patients)
-            .values
-        )
+    # Feature indices — shared by both the upper-plot means and the lower-left batch rows
+    feat_cols = list(X.columns)
+    feat_idx_x = feat_cols.index(feature_x)
+    feat_idx_y = feat_cols.index(feature_y)
 
-    lr_cfe_x = orig_x + _mean_cfe_delta("logistic_regression", feature_x)
-    lr_cfe_y = orig_y + _mean_cfe_delta("logistic_regression", feature_y)
-    en_cfe_x = orig_x + _mean_cfe_delta("elastic_net", feature_x)
-    en_cfe_y = orig_y + _mean_cfe_delta("elastic_net", feature_y)
+    # Upper-plot trajectory destinations: mean over the 20-CFE batch per patient per model.
+    # Batch arrays are absolute feature values, so the mean IS the destination coordinate.
+    # NaN is used when a patient's batch entry is absent; the existing finite-value filter
+    # in the axis-range block and _arrow_segments will exclude those patients.
+    lr_cfe_x = np.full(len(patients), np.nan)
+    lr_cfe_y = np.full(len(patients), np.nan)
+    en_cfe_x = np.full(len(patients), np.nan)
+    en_cfe_y = np.full(len(patients), np.nan)
+
+    for pat_pos in range(len(patients)):
+        if batch_lr is not None:
+            cfes = batch_lr[pat_pos]
+            if cfes:
+                mean_cfe = np.array(cfes).mean(axis=0)
+                lr_cfe_x[pat_pos] = mean_cfe[feat_idx_x]
+                lr_cfe_y[pat_pos] = mean_cfe[feat_idx_y]
+        if batch_en is not None:
+            cfes = batch_en[pat_pos]
+            if cfes:
+                mean_cfe = np.array(cfes).mean(axis=0)
+                en_cfe_x[pat_pos] = mean_cfe[feat_idx_x]
+                en_cfe_y[pat_pos] = mean_cfe[feat_idx_y]
 
     # Shared axis range: union of all finite points + grid bounds
     all_x = np.concatenate([orig_x, lr_cfe_x, en_cfe_x, [x_vals[0], x_vals[-1]]])
@@ -316,14 +333,34 @@ def precompute_boundary_data(
     lr_preds = lr_pipeline.predict(X.loc[patients]).astype(int)
     en_preds = en_pipeline.predict(X.loc[patients]).astype(int)
 
-    # Individual (unaggregated) CFE positions for the detail subplot
-    orig_x_ser = X[feature_x]
-    orig_y_ser = X[feature_y]
-    indiv = all_deltas[["patient_idx", "model", f"{feature_x}_raw", f"{feature_y}_raw"]].copy()
-    indiv["orig_x"] = indiv["patient_idx"].map(orig_x_ser)
-    indiv["orig_y"] = indiv["patient_idx"].map(orig_y_ser)
-    indiv["cfe_x"] = indiv["orig_x"] + indiv[f"{feature_x}_raw"]
-    indiv["cfe_y"] = indiv["orig_y"] + indiv[f"{feature_y}_raw"]
+    # Individual CFE batch: all 20 CFEs per patient per model for the lower-left subplot
+    indiv_cfe_batch = None
+    if batch_lr is not None or batch_en is not None:
+        rows = []
+        for pat_pos, pat_idx in enumerate(patients):
+            orig_x_val = float(X.loc[pat_idx, feature_x])
+            orig_y_val = float(X.loc[pat_idx, feature_y])
+            if batch_lr is not None:
+                for cfe_arr in (batch_lr[pat_pos] or []):
+                    rows.append({
+                        "patient_idx": int(pat_idx),
+                        "model": "logistic_regression",
+                        "orig_x": orig_x_val,
+                        "orig_y": orig_y_val,
+                        "cfe_x": float(cfe_arr[feat_idx_x]),
+                        "cfe_y": float(cfe_arr[feat_idx_y]),
+                    })
+            if batch_en is not None:
+                for cfe_arr in (batch_en[pat_pos] or []):
+                    rows.append({
+                        "patient_idx": int(pat_idx),
+                        "model": "elastic_net",
+                        "orig_x": orig_x_val,
+                        "orig_y": orig_y_val,
+                        "cfe_x": float(cfe_arr[feat_idx_x]),
+                        "cfe_y": float(cfe_arr[feat_idx_y]),
+                    })
+        indiv_cfe_batch = pd.DataFrame(rows)
 
     return dict(
         feature_x=feature_x,
@@ -343,7 +380,7 @@ def precompute_boundary_data(
         en_preds=en_preds,
         x_range=x_range,
         y_range=y_range,
-        indiv_cfe=indiv[["patient_idx", "model", "orig_x", "orig_y", "cfe_x", "cfe_y"]].reset_index(drop=True),
+        indiv_cfe_batch=indiv_cfe_batch,
     )
 
 
@@ -418,6 +455,7 @@ def assemble_boundary_fig(
         direction: str = "Both",
         selected_patient: int | None = None,
         pca_results: pd.DataFrame | None = None,
+        indiv_model: str = "Both",
 ) -> go.Figure:
     """
     Build the decision boundary figure from pre-computed data.
@@ -596,11 +634,136 @@ def assemble_boundary_fig(
         row=2, col=1,
     )
 
-    if selected_patient is not None and "indiv_cfe" in data:
-        indiv_df = data["indiv_cfe"]
-        pat_df = indiv_df[indiv_df["patient_idx"] == selected_patient]
-        lr_df = pat_df[pat_df["model"] == "logistic_regression"].dropna(subset=["cfe_x", "cfe_y"])
-        en_df = pat_df[pat_df["model"] == "elastic_net"].dropna(subset=["cfe_x", "cfe_y"])
+    # --- Lower-right subplot: PCA structure scatter ---
+    # Trace 13 = background (all visible non-selected patients)
+    # Trace 14 = highlight (selected patient only)
+    # Two traces are always added to keep indices stable for the callback.
+    if pca_results is not None:
+        n_features = sum(1 for c in pca_results.columns if c.startswith("pc1_v"))
+        lr_pca = pca_results[pca_results["model"] == "logistic_regression"].set_index("patient_idx")
+        en_pca = pca_results[pca_results["model"] == "elastic_net"].set_index("patient_idx")
+        shared_pca = lr_pca.index.intersection(en_pca.index)
+
+        visible_patients = set(patients[unified_mask].tolist())
+        shared_f = shared_pca[shared_pca.isin(visible_patients)]
+        lr_f = lr_pca.loc[shared_f]
+        en_f = en_pca.loc[shared_f]
+
+        pc1_cols = [f"pc1_v{i}" for i in range(n_features)]
+        mean_cols = [f"mean_v{i}" for i in range(n_features)]
+
+        lr_pc1 = lr_f[pc1_cols].values
+        en_pc1 = en_f[pc1_cols].values
+        lr_mean = lr_f[mean_cols].values
+        en_mean = en_f[mean_cols].values
+
+        dots = np.clip(np.abs((lr_pc1 * en_pc1).sum(axis=1)), -1.0, 1.0)
+        pc1_angle = np.degrees(np.arccos(dots))
+        confidence_diff = lr_f["mean_confidence"].values - en_f["mean_confidence"].values
+        centre_distance = np.linalg.norm(lr_mean - en_mean, axis=1)
+        reliability = np.minimum(lr_f["pc1_ratio"].values, en_f["pc1_ratio"].values)
+        size_norm = centre_distance / (centre_distance.max() or 1.0)
+
+        bg_x, bg_y, bg_sizes, bg_opacities, bg_cdata = [], [], [], [], []
+        hl_x, hl_y, hl_cdata = [], [], []
+        for i, p in enumerate(shared_f.tolist()):
+            if selected_patient is not None and p == selected_patient:
+                hl_x.append(float(confidence_diff[i]))
+                hl_y.append(float(pc1_angle[i]))
+                hl_cdata.append(p)
+            else:
+                bg_x.append(float(confidence_diff[i]))
+                bg_y.append(float(pc1_angle[i]))
+                bg_sizes.append(float(4 + size_norm[i] * 16))
+                bg_opacities.append(float(0.3 + 0.7 * reliability[i]))
+                bg_cdata.append(p)
+
+        x_max_pca = (
+            max(abs(float(confidence_diff.min())), abs(float(confidence_diff.max())))
+            if len(confidence_diff) > 0 else 0.5
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=bg_x, y=bg_y,
+                mode="markers",
+                marker=dict(
+                    size=bg_sizes or 8,
+                    color="#d4d4d4",
+                    opacity=bg_opacities or 0.5,
+                    line=dict(width=0.5, color="grey"),
+                ),
+                customdata=bg_cdata,
+                hovertemplate=(
+                    "Patient: %{customdata}<br>"
+                    "Mean confidence diff (LR−EN): %{x:.3f}<br>"
+                    "PC1 angle: %{y:.1f}°"
+                    "<extra></extra>"
+                ),
+                showlegend=False,
+            ),
+            row=2, col=2,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=hl_x, y=hl_y,
+                mode="markers",
+                marker=dict(
+                    size=16,
+                    color="#ffffff",
+                    opacity=1.0,
+                    line=dict(width=2, color="white"),
+                ),
+                customdata=hl_cdata,
+                hovertemplate=(
+                    "Patient: %{customdata}<br>"
+                    "Mean confidence diff (LR−EN): %{x:.3f}<br>"
+                    "PC1 angle: %{y:.1f}°"
+                    "<extra></extra>"
+                ),
+                showlegend=False,
+            ),
+            row=2, col=2,
+        )
+
+        fig.update_xaxes(
+            title_text="← EN's CFEs land deeper   |   LR's CFEs land deeper →",
+            range=[-x_max_pca * 1.1, x_max_pca * 1.1],
+            zeroline=True, zerolinecolor=GRID_COLOR, zerolinewidth=1,
+            row=2, col=2,
+        )
+        fig.update_yaxes(title_text="PC1 angle (degrees)", range=[0, 92], row=2, col=2)
+
+        fig.add_shape(
+            type="line",
+            x0=-0.3, x1=-0.3, y0=5, y1=85,
+            xref="x4", yref="y4",
+            line=dict(color=GRID_COLOR, width=1, dash="dash"),
+        )
+        fig.add_annotation(
+            x=-0.3, y=50, xref="x4", yref="y4",
+            text="↑ Models look different ways",
+            showarrow=False, font=dict(color=TEXT_COLOR, size=10), xanchor="left",
+        )
+        fig.add_annotation(
+            x=-0.3, y=40, xref="x4", yref="y4",
+            text="↓ Models look the same way",
+            showarrow=False, font=dict(color=TEXT_COLOR, size=10), xanchor="left",
+        )
+    else:
+        for _ in range(2):
+            fig.add_trace(go.Scatter(x=[], y=[], mode="markers", showlegend=False), row=2, col=2)
+        fig.update_xaxes(visible=False, row=2, col=2)
+        fig.update_yaxes(visible=False, row=2, col=2)
+
+    indiv_batch = data.get("indiv_cfe_batch")
+    if selected_patient is not None and indiv_batch is not None:
+        pat_df = indiv_batch[indiv_batch["patient_idx"] == selected_patient]
+        show_lr = indiv_model in ("Both", "LR")
+        show_en = indiv_model in ("Both", "EN")
+
+        lr_df = pat_df[pat_df["model"] == "logistic_regression"].dropna(subset=["cfe_x", "cfe_y"]) if show_lr else pd.DataFrame()
+        en_df = pat_df[pat_df["model"] == "elastic_net"].dropna(subset=["cfe_x", "cfe_y"]) if show_en else pd.DataFrame()
 
         if not pat_df.empty:
             orig_x_pt = float(pat_df["orig_x"].iloc[0])
@@ -620,7 +783,7 @@ def assemble_boundary_fig(
                 fig.add_trace(
                     go.Scatter(
                         x=lr_df["cfe_x"].tolist(), y=lr_df["cfe_y"].tolist(), mode="markers",
-                        marker=dict(color=_LR_COLOR, size=8, line=dict(width=0.5, color="grey")),
+                        marker=dict(color=_LR_COLOR, size=6, opacity=0.7, line=dict(width=0.5, color="grey")),
                         name="LR CFE", showlegend=True,
                         hovertemplate="LR CFE: (%{x:.3f}, %{y:.3f})<extra></extra>",
                     ),
@@ -641,7 +804,7 @@ def assemble_boundary_fig(
                 fig.add_trace(
                     go.Scatter(
                         x=en_df["cfe_x"].tolist(), y=en_df["cfe_y"].tolist(), mode="markers",
-                        marker=dict(color=_EN_COLOR, size=8, line=dict(width=0.5, color="grey")),
+                        marker=dict(color=_EN_COLOR, size=6, opacity=0.7, line=dict(width=0.5, color="grey")),
                         name="EN CFE", showlegend=True,
                         hovertemplate="EN CFE: (%{x:.3f}, %{y:.3f})<extra></extra>",
                     ),
@@ -667,73 +830,6 @@ def assemble_boundary_fig(
 
     fig.update_xaxes(title_text=feature_x, range=data["x_range"], row=2, col=1)
     fig.update_yaxes(title_text=feature_y, range=data["y_range"], row=2, col=1)
-
-    if pca_results is not None:
-        n_features = sum(1 for c in pca_results.columns if c.startswith("pc1_v"))
-        lr_pca = pca_results[pca_results["model"] == "logistic_regression"].set_index("patient_idx")
-        en_pca = pca_results[pca_results["model"] == "elastic_net"].set_index("patient_idx")
-        shared = lr_pca.index.intersection(en_pca.index)
-        lr_pca = lr_pca.loc[shared]
-        en_pca = en_pca.loc[shared]
-
-        pc1_cols = [f"pc1_v{i}" for i in range(n_features)]
-        mean_cols = [f"mean_v{i}" for i in range(n_features)]
-
-        lr_pc1 = lr_pca[pc1_cols].values
-        en_pc1 = en_pca[pc1_cols].values
-        lr_mean = lr_pca[mean_cols].values
-        en_mean = en_pca[mean_cols].values
-
-        dots = np.clip(np.abs((lr_pc1 * en_pc1).sum(axis=1)), -1.0, 1.0)
-        pc1_angle = np.degrees(np.arccos(dots))
-        pc1_ratio_diff = lr_pca["pc1_ratio"].values - en_pca["pc1_ratio"].values
-        centre_distance = np.linalg.norm(lr_mean - en_mean, axis=1)
-        reliability = np.minimum(lr_pca["pc1_ratio"].values, en_pca["pc1_ratio"].values)
-
-        size_norm = centre_distance / (centre_distance.max() or 1.0)
-        marker_sizes = (4 + size_norm * 16).tolist()
-        marker_opacity = (0.3 + 0.7 * reliability).tolist()
-
-        x_max = max(abs(float(pc1_ratio_diff.min())), abs(float(pc1_ratio_diff.max())))
-
-        fig.add_trace(
-            go.Scatter(
-                x=pc1_ratio_diff.tolist(),
-                y=pc1_angle.tolist(),
-                mode="markers",
-                marker=dict(
-                    size=marker_sizes,
-                    color="#d4d4d4",
-                    opacity=marker_opacity,
-                    line=dict(width=0.5, color="grey"),
-                ),
-                customdata=shared.tolist(),
-                hovertemplate=(
-                    "Patient: %{customdata}<br>"
-                    "PC1 ratio diff (LR−EN): %{x:.3f}<br>"
-                    "PC1 angle: %{y:.1f}°"
-                    "<extra></extra>"
-                ),
-                showlegend=False,
-            ),
-            row=2, col=2,
-        )
-        fig.update_xaxes(
-            title_text="← EN more focused   |   LR more focused →",
-            range=[-x_max * 1.1, x_max * 1.1],
-            zeroline=True,
-            zerolinecolor=GRID_COLOR,
-            zerolinewidth=1,
-            row=2, col=2,
-        )
-        fig.update_yaxes(
-            title_text="PC1 angle (degrees)",
-            range=[0, 92],
-            row=2, col=2,
-        )
-    else:
-        fig.update_xaxes(visible=False, row=2, col=2)
-        fig.update_yaxes(visible=False, row=2, col=2)
 
     fig.update_layout(
         template=TEMPLATE,
