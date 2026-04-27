@@ -593,20 +593,21 @@ def assemble_boundary_fig(
     fig.update_yaxes(title_text=feature_y, range=data["y_range"], row=1, col=1)
     fig.update_yaxes(range=data["y_range"], row=1, col=2)
 
-    # Dummy trace: single legend entry representing both models' CFE destinations.
-    # Horizontal gradient gives a left=LR, right=EN split appearance in the legend swatch.
+    # Two separate legend entries for LR and EN CFE destinations (traces 10, 11)
     fig.add_trace(
         go.Scatter(
-            x=[None], y=[None],
-            mode="markers",
-            marker=dict(
-                symbol="circle",
-                size=6,
-                color=_LR_COLOR,
-                gradient=dict(type="horizontal", color=_EN_COLOR),
-                line=dict(width=0.5, color="grey"),
-            ),
-            name="Counterfactual",
+            x=[None], y=[None], mode="markers",
+            marker=dict(symbol="circle", size=6, color=_LR_COLOR, line=dict(width=0.5, color="grey")),
+            name="LR counterfactual",
+            showlegend=True,
+        ),
+        row=1, col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[None], y=[None], mode="markers",
+            marker=dict(symbol="circle", size=6, color=_EN_COLOR, line=dict(width=0.5, color="grey")),
+            name="EN counterfactual",
             showlegend=True,
         ),
         row=1, col=1,
@@ -635,8 +636,8 @@ def assemble_boundary_fig(
     )
 
     # --- Lower-right subplot: PCA structure scatter ---
-    # Trace 13 = background (all visible non-selected patients)
-    # Trace 14 = highlight (selected patient only)
+    # Trace 14 = background (all visible non-selected patients)
+    # Trace 15 = highlight (selected patient only)
     # Two traces are always added to keep indices stable for the callback.
     if pca_results is not None:
         n_features = sum(1 for c in pca_results.columns if c.startswith("pc1_v"))
@@ -650,21 +651,26 @@ def assemble_boundary_fig(
         en_f = en_pca.loc[shared_f]
 
         pc1_cols = [f"pc1_v{i}" for i in range(n_features)]
-        mean_cols = [f"mean_v{i}" for i in range(n_features)]
 
+        # Full-population confidence diff — used for stable x axis range regardless of filter state.
+        lr_full = lr_pca.loc[shared_pca]
+        en_full = en_pca.loc[shared_pca]
+        confidence_diff_full = lr_full["mean_confidence"].values - en_full["mean_confidence"].values
+        x_max_pca = (
+            max(abs(float(confidence_diff_full.min())), abs(float(confidence_diff_full.max())))
+            if len(confidence_diff_full) > 0 else 0.5
+        )
+
+        # Filtered metrics (visible patients only, honouring the direction filter)
         lr_pc1 = lr_f[pc1_cols].values
         en_pc1 = en_f[pc1_cols].values
-        lr_mean = lr_f[mean_cols].values
-        en_mean = en_f[mean_cols].values
 
         dots = np.clip(np.abs((lr_pc1 * en_pc1).sum(axis=1)), -1.0, 1.0)
         pc1_angle = np.degrees(np.arccos(dots))
         confidence_diff = lr_f["mean_confidence"].values - en_f["mean_confidence"].values
-        centre_distance = np.linalg.norm(lr_mean - en_mean, axis=1)
         reliability = np.minimum(lr_f["pc1_ratio"].values, en_f["pc1_ratio"].values)
-        size_norm = centre_distance / (centre_distance.max() or 1.0)
 
-        bg_x, bg_y, bg_sizes, bg_opacities, bg_cdata = [], [], [], [], []
+        bg_x, bg_y, bg_opacities, bg_cdata = [], [], [], []
         hl_x, hl_y, hl_cdata = [], [], []
         for i, p in enumerate(shared_f.tolist()):
             if selected_patient is not None and p == selected_patient:
@@ -674,21 +680,15 @@ def assemble_boundary_fig(
             else:
                 bg_x.append(float(confidence_diff[i]))
                 bg_y.append(float(pc1_angle[i]))
-                bg_sizes.append(float(4 + size_norm[i] * 16))
                 bg_opacities.append(float(0.3 + 0.7 * reliability[i]))
                 bg_cdata.append(p)
-
-        x_max_pca = (
-            max(abs(float(confidence_diff.min())), abs(float(confidence_diff.max())))
-            if len(confidence_diff) > 0 else 0.5
-        )
 
         fig.add_trace(
             go.Scatter(
                 x=bg_x, y=bg_y,
                 mode="markers",
                 marker=dict(
-                    size=bg_sizes or 8,
+                    size=8,
                     color="#d4d4d4",
                     opacity=bg_opacities or 0.5,
                     line=dict(width=0.5, color="grey"),
@@ -732,22 +732,23 @@ def assemble_boundary_fig(
             zeroline=True, zerolinecolor=GRID_COLOR, zerolinewidth=1,
             row=2, col=2,
         )
-        fig.update_yaxes(title_text="PC1 angle (degrees)", range=[0, 92], row=2, col=2)
+        fig.update_yaxes(title_text="PC1 angle between models (degrees)", range=[0, 92], row=2, col=2)
 
-        fig.add_shape(
-            type="line",
-            x0=-0.3, x1=-0.3, y0=5, y1=85,
-            xref="x4", yref="y4",
-            line=dict(color=GRID_COLOR, width=1, dash="dash"),
+        fig.add_annotation(
+            x=-0.2, y=85, ax=-0.2, ay=15,
+            xref="x4", yref="y4", axref="x4", ayref="y4",
+            arrowhead=2, arrowside="end+start", arrowsize=1.2,
+            arrowcolor=GRID_COLOR,
+            showarrow=True, text="",
         )
         fig.add_annotation(
-            x=-0.3, y=50, xref="x4", yref="y4",
-            text="↑ Models look different ways",
+            x=-0.175, y=60, xref="x4", yref="y4",
+            text="Models look different ways",
             showarrow=False, font=dict(color=TEXT_COLOR, size=10), xanchor="left",
         )
         fig.add_annotation(
-            x=-0.3, y=40, xref="x4", yref="y4",
-            text="↓ Models look the same way",
+            x=-0.175, y=35, xref="x4", yref="y4",
+            text="Models look similar ways",
             showarrow=False, font=dict(color=TEXT_COLOR, size=10), xanchor="left",
         )
     else:
@@ -784,7 +785,7 @@ def assemble_boundary_fig(
                     go.Scatter(
                         x=lr_df["cfe_x"].tolist(), y=lr_df["cfe_y"].tolist(), mode="markers",
                         marker=dict(color=_LR_COLOR, size=6, opacity=0.7, line=dict(width=0.5, color="grey")),
-                        name="LR CFE", showlegend=True,
+                        name="LR CFE", showlegend=False,
                         hovertemplate="LR CFE: (%{x:.3f}, %{y:.3f})<extra></extra>",
                     ),
                     row=2, col=1,
@@ -805,7 +806,7 @@ def assemble_boundary_fig(
                     go.Scatter(
                         x=en_df["cfe_x"].tolist(), y=en_df["cfe_y"].tolist(), mode="markers",
                         marker=dict(color=_EN_COLOR, size=6, opacity=0.7, line=dict(width=0.5, color="grey")),
-                        name="EN CFE", showlegend=True,
+                        name="EN CFE", showlegend=False,
                         hovertemplate="EN CFE: (%{x:.3f}, %{y:.3f})<extra></extra>",
                     ),
                     row=2, col=1,
@@ -833,7 +834,7 @@ def assemble_boundary_fig(
 
     fig.update_layout(
         template=TEMPLATE,
-        height=int(CHART_HEIGHT * 1.75),
+        autosize=True,
         title=f"Decision boundaries: {feature_x} vs {feature_y}",
         showlegend=True,
         legend=dict(x=1.02, y=1),

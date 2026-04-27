@@ -30,8 +30,8 @@ batch_en = joblib.load(DATA_DIR / "cfe_batch_en_20.pkl")
 _DATA = precompute_boundary_data(all_deltas, X, lr_pipeline, en_pipeline, batch_lr=batch_lr, batch_en=batch_en)
 
 # Traces with patient customdata: arrows (1,2,6,7), CFE markers (3,8), originals (4,9),
-# PCA scatter bg (13) and highlight (14)
-_PATIENT_TRACE_INDICES = {1, 2, 3, 4, 6, 7, 8, 9, 13, 14}
+# PCA scatter bg (14) and highlight (15) — indices shifted by the two legend dummy traces (10,11)
+_PATIENT_TRACE_INDICES = {1, 2, 3, 4, 6, 7, 8, 9, 14, 15}
 
 
 def layout():
@@ -62,11 +62,8 @@ def layout():
                     inline=True,
                 ),
             ], width="auto", className="d-flex align-items-center ms-3"),
-        ], className="mb-2 align-items-center"),
-
-        dbc.Row([
             dbc.Col([
-                dbc.Label("Individual CFEs", className="fw-bold mb-2", style={"fontSize": "0.8rem"}),
+                dbc.Label("Individual CFE view:", className="me-2 mb-0"),
                 dbc.RadioItems(
                     id="p2-indiv-model-filter",
                     options=[
@@ -75,12 +72,16 @@ def layout():
                         {"label": "EN", "value": "EN"},
                     ],
                     value="Both",
+                    inline=True,
                 ),
-            ], width="auto", className="d-flex flex-column justify-content-center pe-3 ps-2"),
-            dbc.Col([
-                dcc.Graph(id="p2-boundary-graph", figure=assemble_boundary_fig(_DATA, pca_results=pca_results)),
-            ]),
-        ], className="g-0 align-items-center"),
+            ], width="auto", className="d-flex align-items-center ms-3"),
+        ], className="mb-2 align-items-center"),
+
+        dcc.Graph(
+            id="p2-boundary-graph",
+            figure=assemble_boundary_fig(_DATA, pca_results=pca_results),
+            style={"height": "calc(100vh - 180px)"},
+        ),
 
     ], fluid=True, className="pt-0")
 
