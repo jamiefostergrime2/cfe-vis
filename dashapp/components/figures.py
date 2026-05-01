@@ -19,11 +19,14 @@ from plotly.subplots import make_subplots
 from components.theme import TEMPLATE, TEXT_COLOR, GRID_COLOR, CHART_HEIGHT
 
 
-def build_heatmap(all_deltas: pd.DataFrame) -> go.Figure:
+def build_heatmap(all_deltas: pd.DataFrame, condensed: bool = False) -> go.Figure:
     """
-    Divergence heatmap: every patient × every feature.
+    Divergence heatmap: every patient × every feature, or a single-row summary.
 
-    Clicking a column (feature) will drive the drill-down to the scatter.
+    condensed=True  → one row showing mean disagreement per feature
+    condensed=False → full patient × feature matrix (original behaviour)
+
+    Clicking a column (feature) drives the drill-down to the scatter in both modes.
     """
 
     norm_cols = [col for col in all_deltas.columns if col.endswith("_norm")]
@@ -44,17 +47,30 @@ def build_heatmap(all_deltas: pd.DataFrame) -> go.Figure:
     col_order = divergence.sum().sort_values(ascending=False).index
     divergence = divergence[col_order]
 
-    # Sort rows by total disagreement (most disagreed patients at the top)
-    divergence = divergence.loc[divergence.sum(axis=1).sort_values(ascending=True).index]
-
     # Clean feature labels: "acpa_norm" → "acpa"
     feature_labels = [col.replace("_norm", "") for col in col_order]
 
+    if condensed:
+        z = divergence.mean(axis=0).values.reshape(1, -1)
+        y_labels = ["Mean disagreement"]
+        title = "Feature disagreement summary (mean across patients)"
+        yaxis_cfg = dict(title="", showticklabels=False)
+    else:
+        # Sort rows by total disagreement (most disagreed patients at the top)
+        divergence = divergence.loc[divergence.sum(axis=1).sort_values(ascending=True).index]
+        z = divergence.values
+        y_labels = [f"Patient {i+1}" for i in divergence.index]
+        title = "Where do Logistic Regression and Elastic Net diverge?"
+        yaxis_cfg = dict(
+            title=dict(text="Patients (Least to most model disagreement)", standoff=10),
+            showticklabels=False,
+        )
+
     fig = go.Figure(
         data=go.Heatmap(
-            z=divergence.values,
+            z=z,
             x=feature_labels,
-            y=[f"Patient {i+1}" for i in divergence.index],
+            y=y_labels,
             colorscale="OrRd",
             zmin=0,
             zmax=1,
@@ -68,16 +84,9 @@ def build_heatmap(all_deltas: pd.DataFrame) -> go.Figure:
         ),
         layout=go.Layout(
             template=TEMPLATE,
-            title="Where do Logistic Regression and Elastic Net diverge?",
-            height=CHART_HEIGHT,
+            title=title,
             xaxis=dict(title="", tickangle=-45),
-            yaxis=dict(
-                title=dict(
-                    text="Patients (Least to most model disagreement)",
-                    standoff=10,
-                ),
-                showticklabels=False,
-            ),
+            yaxis=yaxis_cfg,
         ),
     )
 
@@ -88,29 +97,44 @@ def build_heatmap(all_deltas: pd.DataFrame) -> go.Figure:
 
 def build_scatter(
     all_deltas: pd.DataFrame,
-    feature: str,
+    feature: str | list[str],
     height: int = CHART_HEIGHT,
     axis_range: list | None = None,
     cmax: float | None = None,
 ) -> go.Figure:
     """
-    Scatter plot: LR delta vs EN delta for one feature, across all patients.
+    Scatter plot: LR delta vs EN delta across all patients.
 
     Parameters
     ----------
-    feature    : clean feature name (e.g. "acpa", not "acpa_norm")
+    feature    : clean feature name (e.g. "acpa") or list of names for
+                 aggregated view — each patient's value is the mean delta
+                 across those features.
     axis_range : fixed [min, max] for both axes — pass to keep scale consistent
                  across features. If None, auto-scales to the current feature.
     cmax       : fixed colorbar maximum — pass to keep the colour scale
                  consistent across features. If None, uses per-feature max.
     """
 
-    norm_col = f"{feature}_norm"
-
-    lr_deltas = (all_deltas[all_deltas["model"] == "logistic_regression"]
-                 .groupby("patient_idx")[norm_col].mean())
-    en_deltas = (all_deltas[all_deltas["model"] == "elastic_net"]
-                 .groupby("patient_idx")[norm_col].mean())
+    if isinstance(feature, list):
+        norm_cols = [f"{f}_norm" for f in feature]
+        lr_deltas = (all_deltas[all_deltas["model"] == "logistic_regression"]
+                     .groupby("patient_idx")[norm_cols].mean().mean(axis=1))
+        en_deltas = (all_deltas[all_deltas["model"] == "elastic_net"]
+                     .groupby("patient_idx")[norm_cols].mean().mean(axis=1))
+        title = f"How do the models disagree across the top {len(feature)} features?"
+        axis_label = f"Mean normalised delta (top {len(feature)} features)"
+        x_label = f"LR: {axis_label}"
+        y_label = f"EN: {axis_label}"
+    else:
+        norm_col = f"{feature}_norm"
+        lr_deltas = (all_deltas[all_deltas["model"] == "logistic_regression"]
+                     .groupby("patient_idx")[norm_col].mean())
+        en_deltas = (all_deltas[all_deltas["model"] == "elastic_net"]
+                     .groupby("patient_idx")[norm_col].mean())
+        title = f"How do the models disagree about {feature}?"
+        x_label = "Logistic Regression: Normalised delta"
+        y_label = "Elastic Net: Normalised delta"
 
     shared = lr_deltas.index.intersection(en_deltas.index)
     lr_vals = lr_deltas.loc[shared].values
@@ -132,7 +156,7 @@ def build_scatter(
                 colorscale="OrRd",
                 cmin=0,
                 cmax=effective_cmax,
-                colorbar=dict(title="Absolute<br>disagreement"),
+                showscale=False,
                 line=dict(width=0.5, color="grey"),
                 opacity=0.8,
             ),
@@ -148,10 +172,9 @@ def build_scatter(
         ),
         layout=go.Layout(
             template=TEMPLATE,
-            height=height,
-            title=f"How do the models disagree about {feature}?",
-            xaxis=dict(title="Logistic Regression: Normalised delta", range=axis_range),
-            yaxis=dict(title="Elastic Net: Normalised delta", range=axis_range),
+            title=title,
+            xaxis=dict(title=x_label, range=axis_range),
+            yaxis=dict(title=y_label, range=axis_range),
         ),
     )
 
