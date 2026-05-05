@@ -6,9 +6,9 @@ no callbacks — just data in, figure out.
 
 Usage:
     from components.figures import (
-        build_heatmap, build_scatter, build_bar,
+        build_heatmap, build_scatter,
         precompute_boundary_data, assemble_boundary_fig,
-        make_predict_fns,
+        make_predict_fns, _select_boundary_features, _MODEL_DISPLAY,
     )
 """
 
@@ -231,12 +231,12 @@ def build_scatter(
                 opacity=0.8,
             ),
 
-            customdata=patient_indices.tolist(),
+            customdata=(patient_indices + 1).tolist(),
 
             hovertemplate=(
-                "Patient: %{customdata}<br>"
-                f"{disp_a} delta: " + "%{x:.3f}<br>"
-                f"{disp_b} delta: " + "%{y:.3f}"
+                f"Patient: %{{customdata}}<br>"
+                f"{disp_a} delta: %{{x:.3f}}<br>"
+                f"{disp_b} delta: %{{y:.3f}}"
                 "<extra></extra>"
             ),
         ),
@@ -264,64 +264,6 @@ def build_scatter(
 
     return fig
 
-
-def build_bar(
-    all_deltas: pd.DataFrame,
-    X: pd.DataFrame,
-    feature: str,
-    patient: int,
-) -> go.Figure:
-    """
-    Bar chart: original value vs model A and model B counterfactual values
-    for one patient and one feature.
-    """
-
-    original_val = X[feature].iloc[patient]
-
-    raw_col = f"{feature}_raw"
-
-    lr_cf_val = original_val + (all_deltas[
-        (all_deltas["patient_idx"] == patient) &
-        (all_deltas["model"] == "logistic_regression")
-    ][raw_col].mean())
-
-    en_cf_val = original_val + (all_deltas[
-        (all_deltas["patient_idx"] == patient) &
-        (all_deltas["model"] == "elastic_net")
-    ][raw_col].mean())
-
-    labels = ["Original", "Logistic Regression<br>Counterfactual", "Elastic Net<br>Counterfactual"]
-    values = [original_val, lr_cf_val, en_cf_val]
-    colors = ["#d4d4d4", "#2a9d8f", "#e76f51"]
-
-    fig = go.Figure(
-        data=go.Bar(
-            x=labels,
-            y=values,
-            marker=dict(
-                color=colors,
-                line=dict(width=0.5, color="grey"),
-            ),
-            text=[f"{v:.2f}" for v in values],
-            textposition="outside",
-            textfont=dict(color=TEXT_COLOR, size=11),
-            width=0.5,
-
-            hovertemplate=(
-                "%{x}<br>"
-                "Value: %{y:.2f}"
-                "<extra></extra>"
-            ),
-        ),
-        layout=go.Layout(
-            template=TEMPLATE,
-            height=CHART_HEIGHT,
-            title=f"Patient {patient}: Counterfactual changes to {feature}",
-            yaxis=dict(title=f"{feature} value"),
-        ),
-    )
-
-    return fig
 
 
 def _select_boundary_features(
@@ -531,26 +473,30 @@ def _arrow_segments(
             p = int(patients[i])
             xs += [float(ox[i]), float(cx[i]), None]
             ys += [float(oy[i]), float(cy[i]), None]
-            cdata += [p, p, None]
+            cdata += [[p, p + 1], [p, p + 1], None]
     return xs, ys, cdata
 
 
 def _point_opacities(
-    mask: np.ndarray,
     patients: np.ndarray,
     selected_patient: int | None,
     full: float,
     dim: float,
-) -> list[float]:
-    """Per-point opacity list for a Scatter trace matching the patients array."""
+) -> float | list[float]:
+    """Per-point opacity for highlight — direction masking is handled by None coordinates."""
+    if selected_patient is None:
+        return full
+    return [full if p == selected_patient else dim for p in patients]
+
+
+def _masked_coords(arr: np.ndarray, mask: np.ndarray, finite_only: bool = False) -> list:
+    """Replace masked or (optionally) non-finite positions with None to suppress click events."""
     result = []
-    for i, p in enumerate(patients):
-        if not mask[i]:
-            result.append(0.0)
-        elif selected_patient is not None and p != selected_patient:
-            result.append(dim)
+    for i in range(len(mask)):
+        if mask[i] and (not finite_only or np.isfinite(arr[i])):
+            result.append(float(arr[i]))
         else:
-            result.append(full)
+            result.append(None)
     return result
 
 
@@ -605,9 +551,9 @@ def assemble_boundary_fig(
         row_heights=[0.5, 0.5],
     )
 
-    hover_cfe = "Patient: %{customdata}<br>Value: %{x:.3f}, %{y:.3f}<extra>CFE</extra>"
-    hover_arrow = "Patient: %{customdata}<extra>Arrow</extra>"
-    hover_orig = "Patient: %{customdata}<br>Value: %{x:.3f}, %{y:.3f}<extra>Original</extra>"
+    hover_cfe = "Patient: %{customdata[1]}<br>Value: %{x:.3f}, %{y:.3f}<extra>CFE</extra>"
+    hover_arrow = "Patient: %{customdata[1]}<extra>Arrow</extra>"
+    hover_orig = "Patient: %{customdata[1]}<br>Value: %{x:.3f}, %{y:.3f}<extra>Original</extra>"
 
     for col, (z, cfe_x, cfe_y, model_color) in enumerate(
             [
@@ -635,7 +581,8 @@ def assemble_boundary_fig(
         if sel_pos is not None:
             hl_xs = [float(orig_x[sel_pos]), float(cfe_x[sel_pos]), None]
             hl_ys = [float(orig_y[sel_pos]), float(cfe_y[sel_pos]), None]
-            hl_cdata = [int(selected_patient), int(selected_patient), None]
+            sp = int(selected_patient)
+            hl_cdata = [[sp, sp + 1], [sp, sp + 1], None]
         else:
             hl_xs, hl_ys, hl_cdata = [], [], []
 
@@ -674,29 +621,33 @@ def assemble_boundary_fig(
         )
 
         # Trace 3/8 — CFE destination markers
-        patients_list = patients.tolist()
-        cfe_opacities = _point_opacities(unified_mask, patients, selected_patient, full=0.75, dim=0.1)
+        patients_cdata = [[int(p), int(p) + 1] for p in patients]
+        cfe_opacities = _point_opacities(patients, selected_patient, full=0.75, dim=0.1)
         cfe_sizes = _point_sizes(patients, selected_patient, normal=5, highlighted=11)
         fig.add_trace(
             go.Scatter(
-                x=cfe_x, y=cfe_y, mode="markers",
+                x=_masked_coords(cfe_x, unified_mask, finite_only=True),
+                y=_masked_coords(cfe_y, unified_mask, finite_only=True),
+                mode="markers",
                 marker=dict(color=model_color, size=cfe_sizes, opacity=cfe_opacities, line=dict(width=0.5, color="grey")),
                 name="CFE destination", showlegend=False,
-                customdata=patients_list, hovertemplate=hover_cfe, visible=show_cfe,
+                customdata=patients_cdata, hovertemplate=hover_cfe, visible=show_cfe,
             ),
             row=1, col=col,
         )
 
         # Trace 4/9 — Original scatter markers
-        orig_opacities = _point_opacities(unified_mask, patients, selected_patient, full=0.85, dim=0.15)
+        orig_opacities = _point_opacities(patients, selected_patient, full=0.85, dim=0.15)
         orig_sizes = _point_sizes(patients, selected_patient, normal=6, highlighted=11)
         orig_colors = ["#ffffff" if (selected_patient is not None and p == selected_patient) else "#d4d4d4" for p in patients]
         fig.add_trace(
             go.Scatter(
-                x=orig_x, y=orig_y, mode="markers",
+                x=_masked_coords(orig_x, unified_mask),
+                y=_masked_coords(orig_y, unified_mask),
+                mode="markers",
                 marker=dict(color=orig_colors, size=orig_sizes, opacity=orig_opacities,
                             line=dict(width=0.5, color="grey")),
-                name="Original", showlegend=show, customdata=patients_list, hovertemplate=hover_orig,
+                name="Original", showlegend=show, customdata=patients_cdata, hovertemplate=hover_orig,
             ),
             row=1, col=col,
         )
@@ -785,12 +736,12 @@ def assemble_boundary_fig(
             if selected_patient is not None and p == selected_patient:
                 hl_x.append(float(confidence_diff[i]))
                 hl_y.append(float(pc1_angle[i]))
-                hl_cdata.append(p)
+                hl_cdata.append([p, p + 1])
             else:
                 bg_x.append(float(confidence_diff[i]))
                 bg_y.append(float(pc1_angle[i]))
                 bg_opacities.append(float(0.3 + 0.7 * reliability[i]))
-                bg_cdata.append(p)
+                bg_cdata.append([p, p + 1])
 
         fig.add_trace(
             go.Scatter(
@@ -804,8 +755,8 @@ def assemble_boundary_fig(
                 ),
                 customdata=bg_cdata,
                 hovertemplate=(
-                    "Patient: %{customdata}<br>"
-                    f"Mean confidence diff ({disp_a}−{disp_b}): " + "%{x:.3f}<br>"
+                    f"Patient: %{{customdata[1]}}<br>"
+                    f"Mean confidence diff ({disp_a}−{disp_b}): %{{x:.3f}}<br>"
                     "PC1 angle: %{y:.1f}°"
                     "<extra></extra>"
                 ),
@@ -825,8 +776,8 @@ def assemble_boundary_fig(
                 ),
                 customdata=hl_cdata,
                 hovertemplate=(
-                    "Patient: %{customdata}<br>"
-                    f"Mean confidence diff ({disp_a}−{disp_b}): " + "%{x:.3f}<br>"
+                    f"Patient: %{{customdata[1]}}<br>"
+                    f"Mean confidence diff ({disp_a}−{disp_b}): %{{x:.3f}}<br>"
                     "PC1 angle: %{y:.1f}°"
                     "<extra></extra>"
                 ),
@@ -969,25 +920,3 @@ def assemble_boundary_fig(
     return fig
 
 
-def build_boundary_view(
-    all_deltas: pd.DataFrame,
-    X: pd.DataFrame,
-    predict_proba_a,
-    predict_class_a,
-    predict_proba_b,
-    predict_class_b,
-    model_a_name: str = "logistic_regression",
-    model_b_name: str = "elastic_net",
-    feature_x: str | None = None,
-    feature_y: str | None = None,
-    grid_n: int = 60,
-) -> go.Figure:
-    """Convenience wrapper: precompute data then assemble the figure."""
-    data = precompute_boundary_data(
-        all_deltas, X,
-        predict_proba_a, predict_class_a,
-        predict_proba_b, predict_class_b,
-        model_a_name, model_b_name,
-        feature_x, feature_y, grid_n,
-    )
-    return assemble_boundary_fig(data)

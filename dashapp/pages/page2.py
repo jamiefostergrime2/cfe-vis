@@ -28,23 +28,8 @@ MODELS_DIR = Path(__file__).resolve().parent.parent.parent / "models"
 with open(DATA_DIR / "cfe_data.pkl", "rb") as _f:
     _cfe_data = pickle.load(_f)
 
-if "pairs" in _cfe_data:
-    _ALL_PAIRS = _cfe_data["pairs"]
-    _BASE_FEATURE_COLS = _cfe_data.get("base_feature_cols", None)
-else:
-    _ALL_PAIRS = {
-        "LR vs EN": {
-            "all_deltas": _cfe_data["all_deltas"],
-            "X": _cfe_data["X"],
-            "pca_results": _cfe_data["pca_results"],
-            "indiv_cfe_batch": _cfe_data["indiv_cfe_batch"],
-            "model_a_name": "logistic_regression",
-            "model_b_name": "elastic_net",
-            "spec_a": None,
-            "spec_b": None,
-        }
-    }
-    _BASE_FEATURE_COLS = None
+_ALL_PAIRS = _cfe_data["pairs"]
+_BASE_FEATURE_COLS = _cfe_data.get("base_feature_cols", None)
 
 _DEFAULT_PAIR = list(_ALL_PAIRS.keys())[0]
 
@@ -59,9 +44,9 @@ with warnings.catch_warnings():
     if _ac_svm_path.exists():
         _PIPELINES["ac_svm"] = joblib.load(_ac_svm_path)
 
-# Build predict function closures for every pair once at import time.
-# Stored so _get_boundary_data never rebuilds them on repeated calls.
+# Build predict function closures and auto-select default feature pairs once at import time.
 _PREDICT_FNS: dict = {}
+_DEFAULT_FEATURES: dict = {}
 for _pn, _pr in _ALL_PAIRS.items():
     _base = _BASE_FEATURE_COLS or list(_pr["X"].columns)
     _ma, _mb = _pr["model_a_name"], _pr["model_b_name"]
@@ -81,12 +66,6 @@ for _pn, _pr in _ALL_PAIRS.items():
         def _cb(df, _pl=_plb, _bc=_base): return _pl.predict(df[_bc]).astype(int)
 
     _PREDICT_FNS[_pn] = (_fa, _ca, _fb, _cb)
-
-# Pre-compute the best default feature pair for each pair (coarse grid scan).
-# This runs once at startup and gives a good out-of-the-box starting selection.
-_DEFAULT_FEATURES: dict = {}
-for _pn, _pr in _ALL_PAIRS.items():
-    _fa, _, _fb, _ = _PREDICT_FNS[_pn]
     _DEFAULT_FEATURES[_pn] = _select_boundary_features(_pr["X"], _fa, _fb)
 
 # Boundary data cache keyed by (pair_name, feature_x, feature_y)
@@ -259,7 +238,7 @@ def update_boundary(
             and p.get("customdata") is not None
         ]
         if patient_pts:
-            clicked = int(patient_pts[0]["customdata"])
+            clicked = int(patient_pts[0]["customdata"][0])
             new_selected = None if clicked == selected_patient else clicked
 
     # Feature change: also clear selected patient (they were selected in a different projection)

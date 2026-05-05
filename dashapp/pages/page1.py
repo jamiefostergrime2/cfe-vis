@@ -22,18 +22,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 with open(DATA_DIR / "cfe_data.pkl", "rb") as _f:
     _cfe_data = pickle.load(_f)
 
-# Support both old flat structure (stopgap) and new nested structure
-if "pairs" in _cfe_data:
-    _ALL_PAIRS = _cfe_data["pairs"]
-else:
-    # Wrap flat structure in the expected nested format
-    _ALL_PAIRS = {
-        "LR vs EN": {
-            "all_deltas": _cfe_data["all_deltas"],
-            "model_a_name": "logistic_regression",
-            "model_b_name": "elastic_net",
-        }
-    }
+_ALL_PAIRS = _cfe_data["pairs"]
 
 _DEFAULT_PAIR = list(_ALL_PAIRS.keys())[0]
 

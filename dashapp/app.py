@@ -10,11 +10,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 with open(DATA_DIR / "cfe_data.pkl", "rb") as _f:
     _cfe_meta = pickle.load(_f)
 
-# Support both the old flat structure (stopgap) and the new nested structure
-if "pairs" in _cfe_meta:
-    _PAIR_NAMES = list(_cfe_meta["pairs"].keys())
-else:
-    _PAIR_NAMES = ["LR vs EN"]
+_PAIR_NAMES = list(_cfe_meta["pairs"].keys())
 _DEFAULT_PAIR = _PAIR_NAMES[0]
 
 app = dash.Dash(
@@ -70,7 +66,7 @@ def update_pair(pair):
     State("navbar-collapse", "is_open"),
     prevent_initial_call=True,
 )
-def toggle_navbar(n, is_open):
+def toggle_navbar(_n, is_open):
     return not is_open
 
 
