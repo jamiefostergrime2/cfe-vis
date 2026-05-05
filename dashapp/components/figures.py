@@ -324,6 +324,49 @@ def build_bar(
     return fig
 
 
+def _select_boundary_features(
+    X: pd.DataFrame,
+    predict_proba_a,
+    predict_proba_b,
+    coarse_n: int = 15,
+) -> tuple[str, str]:
+    """
+    From all feature pairs, pick the pair where both models have the widest
+    probability range in the 2D projection (other features fixed at median).
+
+    Scores each pair by the minimum probability range across both models — this
+    ensures neither model's boundary is invisible in the plot.
+    """
+    features = list(X.columns)
+    medians = X.median()
+    n_pts = coarse_n * coarse_n
+
+    best_score = -1.0
+    best_pair = (features[0], features[1])
+
+    for i, fx in enumerate(features):
+        x_vals = np.linspace(X[fx].min(), X[fx].max(), coarse_n)
+        for j, fy in enumerate(features):
+            if j <= i:
+                continue
+            y_vals = np.linspace(X[fy].min(), X[fy].max(), coarse_n)
+            xx, yy = np.meshgrid(x_vals, y_vals)
+            grid_df = pd.DataFrame(
+                np.tile(medians.values, (n_pts, 1)), columns=X.columns
+            )
+            grid_df[fx] = xx.ravel()
+            grid_df[fy] = yy.ravel()
+
+            za = predict_proba_a(grid_df)[:, 1]
+            zb = predict_proba_b(grid_df)[:, 1]
+            score = min(float(za.max() - za.min()), float(zb.max() - zb.min()))
+            if score > best_score:
+                best_score = score
+                best_pair = (fx, fy)
+
+    return best_pair
+
+
 def precompute_boundary_data(
     all_deltas: pd.DataFrame,
     X: pd.DataFrame,
@@ -353,18 +396,14 @@ def precompute_boundary_data(
     cfe_{feature} for every feature in X.
     """
 
-    # Auto-pick top-2 features by model disagreement
+    # Auto-pick feature pair: find the pair where both models' boundaries are
+    # visible in 2D projection. Pure disagreement-based selection fails when
+    # one model (e.g. SVM) has its boundary along different features than the
+    # other model.
     if feature_x is None or feature_y is None:
-        norm_cols = [c for c in all_deltas.columns if c.endswith("_norm")]
-        a_avg = (all_deltas[all_deltas["model"] == model_a_name]
-                 .groupby("patient_idx")[norm_cols].mean())
-        b_avg = (all_deltas[all_deltas["model"] == model_b_name]
-                 .groupby("patient_idx")[norm_cols].mean())
-        shared = a_avg.index.intersection(b_avg.index)
-        divergence = (b_avg.loc[shared] - a_avg.loc[shared]).abs()
-        top2 = divergence.sum().sort_values(ascending=False).index[:2]
-        feature_x = top2[0].replace("_norm", "")
-        feature_y = top2[1].replace("_norm", "")
+        feature_x, feature_y = _select_boundary_features(
+            X, predict_proba_a, predict_proba_b
+        )
 
     margin = 0.05
     x_min, x_max = X[feature_x].min(), X[feature_x].max()

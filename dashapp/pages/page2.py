@@ -10,6 +10,7 @@ from components.figures import (
     precompute_boundary_data,
     assemble_boundary_fig,
     make_predict_fns,
+    _select_boundary_features,
     _MODEL_DISPLAY,
 )
 
@@ -27,7 +28,6 @@ MODELS_DIR = Path(__file__).resolve().parent.parent.parent / "models"
 with open(DATA_DIR / "cfe_data.pkl", "rb") as _f:
     _cfe_data = pickle.load(_f)
 
-# Support both old flat structure (stopgap) and new nested structure
 if "pairs" in _cfe_data:
     _ALL_PAIRS = _cfe_data["pairs"]
     _BASE_FEATURE_COLS = _cfe_data.get("base_feature_cols", None)
@@ -48,7 +48,7 @@ else:
 
 _DEFAULT_PAIR = list(_ALL_PAIRS.keys())[0]
 
-# Load all pipelines once at import time
+# Load all pipelines once
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     _PIPELINES = {
@@ -59,56 +59,63 @@ with warnings.catch_warnings():
     if _ac_svm_path.exists():
         _PIPELINES["ac_svm"] = joblib.load(_ac_svm_path)
 
-# Precomputed boundary data cache (populated on first access per pair)
+# Build predict function closures for every pair once at import time.
+# Stored so _get_boundary_data never rebuilds them on repeated calls.
+_PREDICT_FNS: dict = {}
+for _pn, _pr in _ALL_PAIRS.items():
+    _base = _BASE_FEATURE_COLS or list(_pr["X"].columns)
+    _ma, _mb = _pr["model_a_name"], _pr["model_b_name"]
+    _spa, _spb = _pr.get("spec_a"), _pr.get("spec_b")
+    _pla, _plb = _PIPELINES.get(_ma), _PIPELINES.get(_mb)
+
+    if _spa and _pla:
+        _fa, _ca = make_predict_fns(_spa, _pla, _base)
+    else:
+        def _fa(df, _pl=_pla, _bc=_base): return _pl.predict_proba(df[_bc])
+        def _ca(df, _pl=_pla, _bc=_base): return _pl.predict(df[_bc]).astype(int)
+
+    if _spb and _plb:
+        _fb, _cb = make_predict_fns(_spb, _plb, _base)
+    else:
+        def _fb(df, _pl=_plb, _bc=_base): return _pl.predict_proba(df[_bc])
+        def _cb(df, _pl=_plb, _bc=_base): return _pl.predict(df[_bc]).astype(int)
+
+    _PREDICT_FNS[_pn] = (_fa, _ca, _fb, _cb)
+
+# Pre-compute the best default feature pair for each pair (coarse grid scan).
+# This runs once at startup and gives a good out-of-the-box starting selection.
+_DEFAULT_FEATURES: dict = {}
+for _pn, _pr in _ALL_PAIRS.items():
+    _fa, _, _fb, _ = _PREDICT_FNS[_pn]
+    _DEFAULT_FEATURES[_pn] = _select_boundary_features(_pr["X"], _fa, _fb)
+
+# Boundary data cache keyed by (pair_name, feature_x, feature_y)
 _DATA_CACHE: dict = {}
 
 # Trace indices in assemble_boundary_fig that carry patient customdata
 _PATIENT_TRACE_INDICES = {1, 2, 3, 4, 6, 7, 8, 9, 14, 15}
 
+# Feature options shared across all dropdowns (11 base features)
+_FEATURE_OPTIONS = [
+    {"label": f, "value": f}
+    for f in (_BASE_FEATURE_COLS or list(list(_ALL_PAIRS.values())[0]["X"].columns))
+]
 
-def _get_boundary_data(pair_name: str) -> tuple[dict, dict]:
-    """Return (precomputed_data, pair_dict) for the given pair, with caching."""
-    if pair_name not in _DATA_CACHE:
+
+def _get_boundary_data(pair_name: str, feature_x: str, feature_y: str) -> tuple[dict, dict]:
+    """Return (precomputed_data, pair_dict), caching by (pair, feature_x, feature_y)."""
+    cache_key = (pair_name, feature_x, feature_y)
+    if cache_key not in _DATA_CACHE:
         pair = _ALL_PAIRS[pair_name]
-        X = pair["X"]
-        ad = pair["all_deltas"]
-        ma = pair["model_a_name"]
-        mb = pair["model_b_name"]
-
-        spec_a = pair.get("spec_a")
-        spec_b = pair.get("spec_b")
-        pipeline_a = _PIPELINES.get(ma)
-        pipeline_b = _PIPELINES.get(mb)
-
-        base_cols = _BASE_FEATURE_COLS or list(X.columns)
-
-        if spec_a is not None and pipeline_a is not None:
-            proba_a, class_a = make_predict_fns(spec_a, pipeline_a, base_cols)
-        else:
-            # Fallback: pipeline accepts X directly
-            def proba_a(df):
-                return pipeline_a.predict_proba(df[base_cols])
-
-            def class_a(df):
-                return pipeline_a.predict(df[base_cols]).astype(int)
-
-        if spec_b is not None and pipeline_b is not None:
-            proba_b, class_b = make_predict_fns(spec_b, pipeline_b, base_cols)
-        else:
-            def proba_b(df):
-                return pipeline_b.predict_proba(df[base_cols])
-
-            def class_b(df):
-                return pipeline_b.predict(df[base_cols]).astype(int)
-
-        _DATA_CACHE[pair_name] = precompute_boundary_data(
-            ad, X,
+        proba_a, class_a, proba_b, class_b = _PREDICT_FNS[pair_name]
+        _DATA_CACHE[cache_key] = precompute_boundary_data(
+            pair["all_deltas"], pair["X"],
             proba_a, class_a, proba_b, class_b,
-            ma, mb,
+            pair["model_a_name"], pair["model_b_name"],
+            feature_x=feature_x, feature_y=feature_y,
             indiv_cfe_batch=pair.get("indiv_cfe_batch"),
         )
-
-    return _DATA_CACHE[pair_name], _ALL_PAIRS[pair_name]
+    return _DATA_CACHE[cache_key], _ALL_PAIRS[pair_name]
 
 
 def _make_model_options(pair_name: str) -> list:
@@ -122,8 +129,14 @@ def _make_model_options(pair_name: str) -> list:
     ]
 
 
+_DROPDOWN_STYLE = {"width": "130px", "color": "#000", "fontSize": "13px"}
+
+
 def layout():
+    fx, fy = _DEFAULT_FEATURES[_DEFAULT_PAIR]
     options = _make_model_options(_DEFAULT_PAIR)
+    data, pair = _get_boundary_data(_DEFAULT_PAIR, fx, fy)
+
     return dbc.Container([
         dcc.Store(id="p2-selected-patient", data=None),
 
@@ -160,14 +173,34 @@ def layout():
                     inline=True,
                 ),
             ], width="auto", className="d-flex align-items-center ms-3"),
+            dbc.Col([
+                dbc.Label("X axis:", className="me-2 mb-0"),
+                dcc.Dropdown(
+                    id="p2-feature-x",
+                    options=_FEATURE_OPTIONS,
+                    value=fx,
+                    clearable=False,
+                    style=_DROPDOWN_STYLE,
+                ),
+            ], width="auto", className="d-flex align-items-center ms-3"),
+            dbc.Col([
+                dbc.Label("vs", className="mb-0"),
+            ], width="auto", className="d-flex align-items-center ms-2"),
+            dbc.Col([
+                dbc.Label("Y axis:", className="me-2 mb-0"),
+                dcc.Dropdown(
+                    id="p2-feature-y",
+                    options=_FEATURE_OPTIONS,
+                    value=fy,
+                    clearable=False,
+                    style=_DROPDOWN_STYLE,
+                ),
+            ], width="auto", className="d-flex align-items-center ms-2"),
         ], className="mb-2 align-items-center"),
 
         dcc.Graph(
             id="p2-boundary-graph",
-            figure=assemble_boundary_fig(
-                _get_boundary_data(_DEFAULT_PAIR)[0],
-                pca_results=_ALL_PAIRS[_DEFAULT_PAIR].get("pca_results"),
-            ),
+            figure=assemble_boundary_fig(data, pca_results=pair.get("pca_results")),
             style={"height": "calc(100vh - 180px)"},
         ),
 
@@ -180,33 +213,43 @@ def layout():
     Output("p2-cfe-toggle", "children"),
     Output("p2-indiv-model-filter", "options"),
     Output("p2-indiv-model-filter", "value"),
+    Output("p2-feature-x", "value"),
+    Output("p2-feature-y", "value"),
     Input("p2-cfe-toggle", "n_clicks"),
     Input("p2-direction-filter", "value"),
     Input("p2-boundary-graph", "clickData"),
     Input("p2-indiv-model-filter", "value"),
     Input("selected-pair", "data"),
+    Input("p2-feature-x", "value"),
+    Input("p2-feature-y", "value"),
     State("p2-selected-patient", "data"),
 )
-def update_boundary(cfe_n_clicks, direction, click_data, indiv_model, selected_pair, selected_patient):
+def update_boundary(
+    cfe_n_clicks, direction, click_data, indiv_model,
+    selected_pair, feat_x, feat_y, selected_patient,
+):
     pair_name = selected_pair or _DEFAULT_PAIR
     triggered_id = callback_context.triggered_id
 
     show_cfe = (cfe_n_clicks or 0) % 2 == 1
     btn_text = "Hide Counterfactuals" if show_cfe else "Show Counterfactuals"
 
-    # Pair switch: reset patient selection, model filter
+    # Pair switch: reset features to the best pair for the new pair, reset patient/model filter
     if triggered_id == "selected-pair":
-        data, pair = _get_boundary_data(pair_name)
+        fx, fy = _DEFAULT_FEATURES.get(pair_name, _DEFAULT_FEATURES[_DEFAULT_PAIR])
+        data, pair = _get_boundary_data(pair_name, fx, fy)
         opts = _make_model_options(pair_name)
         fig = assemble_boundary_fig(
-            data, show_cfe, direction, None,
-            pair.get("pca_results"), "Both",
+            data, show_cfe, direction, None, pair.get("pca_results"), "Both",
         )
-        return fig, None, btn_text, opts, "Both"
+        return fig, None, btn_text, opts, "Both", fx, fy
 
-    data, pair = _get_boundary_data(pair_name)
+    # Resolve feature values (may be None on initial load edge cases)
+    fx = feat_x or _DEFAULT_FEATURES[pair_name][0]
+    fy = feat_y or _DEFAULT_FEATURES[pair_name][1]
+
+    data, pair = _get_boundary_data(pair_name, fx, fy)
     pca_results = pair.get("pca_results")
-    model_options = no_update  # options don't change within a pair
 
     new_selected = selected_patient
     if triggered_id == "p2-boundary-graph" and click_data:
@@ -219,5 +262,9 @@ def update_boundary(cfe_n_clicks, direction, click_data, indiv_model, selected_p
             clicked = int(patient_pts[0]["customdata"])
             new_selected = None if clicked == selected_patient else clicked
 
+    # Feature change: also clear selected patient (they were selected in a different projection)
+    if triggered_id in ("p2-feature-x", "p2-feature-y"):
+        new_selected = None
+
     fig = assemble_boundary_fig(data, show_cfe, direction, new_selected, pca_results, indiv_model)
-    return fig, new_selected, btn_text, model_options, no_update
+    return fig, new_selected, btn_text, no_update, no_update, no_update, no_update
