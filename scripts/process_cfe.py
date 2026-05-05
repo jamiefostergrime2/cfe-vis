@@ -32,6 +32,7 @@ CACHE_EN_20 = DATA_DIR / "cfe_batch_en_20.pkl"
 OUTPUT_PATH = DATA_DIR / "all_deltas.parquet"
 X_OUTPUT_PATH = DATA_DIR / "X.parquet"
 PCA_OUTPUT_PATH = DATA_DIR / "cfe_pca_results.parquet"
+CFE_DATA_PATH = DATA_DIR / "cfe_data.pkl"
 
 
 def load_data() -> tuple[pd.DataFrame, list[str]]:
@@ -53,7 +54,9 @@ def load_data() -> tuple[pd.DataFrame, list[str]]:
     df["outcome"] = y_values
 
     feature_cols = [col for col in df.columns if col != "outcome"]
-    X = df[feature_cols]
+    # Reset to a clean 0-based index so patient_idx (from enumerate) always
+    # aligns with X.iloc — the source data may have non-sequential row labels.
+    X = df[feature_cols].reset_index(drop=True)
     return X, feature_cols
 
 
@@ -194,36 +197,49 @@ def compute_pca_results(
     return pd.DataFrame(rows)
 
 
+def compute_indiv_cfe_batch(
+    cfe_lr_20: list,
+    cfe_en_20: list,
+    X: pd.DataFrame,
+    feature_cols: list[str],
+) -> pd.DataFrame:
+    """
+    Build a long-format DataFrame of every individual CFE for both models.
+
+    Each row is one (patient, model, cf_number) triple, storing absolute
+    feature values for both the original patient and the counterfactual as
+    orig_{feature} and cfe_{feature} columns.  All features are stored so
+    the dashapp can select any feature pair at runtime without re-running
+    this script.
+    """
+    rows = []
+    for model_name, cfe_results in [
+        ("logistic_regression", cfe_lr_20),
+        ("elastic_net", cfe_en_20),
+    ]:
+        for patient_idx, cfe_list in enumerate(cfe_results):
+            if cfe_list is None:
+                continue
+            orig_values = X.iloc[patient_idx].values
+            for cf_idx, cf_arr in enumerate(cfe_list):
+                row: dict = {
+                    "patient_idx": patient_idx,
+                    "model": model_name,
+                    "cf_number": cf_idx,
+                }
+                for i, feature in enumerate(feature_cols):
+                    row[f"orig_{feature}"] = float(orig_values[i])
+                    row[f"cfe_{feature}"] = float(cf_arr[i])
+                rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def main() -> None:
     print("Loading dataset...")
     X, feature_cols = load_data()
     print(f"  {len(X)} patients, {len(feature_cols)} features.")
 
-    print("Loading CFE caches...")
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        cfe_lr = load_cache(CACHE_LR)
-        cfe_en = load_cache(CACHE_EN)
-
-    print("Computing normalised deltas...")
-    deltas_lr = compute_normalised_deltas(cfe_lr, X, feature_cols, "logistic_regression")
-    deltas_en = compute_normalised_deltas(cfe_en, X, feature_cols, "elastic_net")
-
-    all_deltas = pd.concat([deltas_lr, deltas_en], ignore_index=True)
-    print(f"  {len(all_deltas)} rows ({len(deltas_lr)} LR + {len(deltas_en)} EN)")
-
-    # pandas 3.x uses Arrow-backed strings by default; fastparquet requires
-    # numpy object dtype strings — cast all non-numeric columns before writing.
-    str_cols = all_deltas.select_dtypes(exclude="number").columns
-    all_deltas[str_cols] = all_deltas[str_cols].astype(object)
-
-    all_deltas.to_parquet(OUTPUT_PATH, engine="fastparquet", index=False)
-    print(f"  Saved to {OUTPUT_PATH}")
-
-    X.to_parquet(X_OUTPUT_PATH, engine="fastparquet", index=False)
-    print(f"  Saved to {X_OUTPUT_PATH}")
-
-    print("Loading 20-CFE caches for PCA...")
+    print("Loading 20-CFE caches...")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         cfe_lr_20 = load_cache(CACHE_LR_20)
@@ -231,12 +247,35 @@ def main() -> None:
         lr_pipeline = joblib.load(MODELS_DIR / "a-lr.pkl")
         en_pipeline = joblib.load(MODELS_DIR / "a-en.pkl")
 
+    print("Computing normalised deltas (20 CFEs)...")
+    deltas_lr = compute_normalised_deltas(cfe_lr_20, X, feature_cols, "logistic_regression")
+    deltas_en = compute_normalised_deltas(cfe_en_20, X, feature_cols, "elastic_net")
+    all_deltas = pd.concat([deltas_lr, deltas_en], ignore_index=True)
+    print(f"  {len(all_deltas)} rows ({len(deltas_lr)} LR + {len(deltas_en)} EN)")
+
     print("Computing PCA results...")
     pca_results = compute_pca_results(cfe_lr_20, cfe_en_20, feature_cols, lr_pipeline, en_pipeline, X)
-    str_cols = pca_results.select_dtypes(exclude="number").columns
-    pca_results[str_cols] = pca_results[str_cols].astype(object)
-    pca_results.to_parquet(PCA_OUTPUT_PATH, engine="fastparquet", index=False)
-    print(f"  Saved to {PCA_OUTPUT_PATH}")
+    print(f"  {len(pca_results)} rows.")
+
+    print("Computing individual CFE batch...")
+    indiv_cfe_batch = compute_indiv_cfe_batch(cfe_lr_20, cfe_en_20, X, feature_cols)
+    print(f"  {len(indiv_cfe_batch)} rows.")
+
+    # pandas 3.x uses Arrow-backed strings by default; fix before any parquet writes.
+    for df in [all_deltas, pca_results, indiv_cfe_batch]:
+        str_cols = df.select_dtypes(exclude="number").columns
+        df[str_cols] = df[str_cols].astype(object)
+
+    print("Saving unified cfe_data.pkl...")
+    cfe_data = {
+        "all_deltas": all_deltas,
+        "X": X,
+        "pca_results": pca_results,
+        "indiv_cfe_batch": indiv_cfe_batch,
+    }
+    with open(CFE_DATA_PATH, "wb") as f:
+        pickle.dump(cfe_data, f)
+    print(f"  Saved to {CFE_DATA_PATH}")
 
 
 if __name__ == "__main__":

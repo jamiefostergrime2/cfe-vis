@@ -1,5 +1,5 @@
+import pickle
 import joblib
-import pandas as pd
 import dash
 import dash_bootstrap_components as dbc
 from dash import dcc, callback, Input, Output, State, callback_context
@@ -18,16 +18,18 @@ dash.register_page(
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 MODELS_DIR = Path(__file__).resolve().parent.parent.parent / "models"
 
-all_deltas = pd.read_parquet(DATA_DIR / "all_deltas.parquet", engine="fastparquet")
-X = pd.read_parquet(DATA_DIR / "X.parquet", engine="fastparquet")
-pca_results = pd.read_parquet(DATA_DIR / "cfe_pca_results.parquet", engine="fastparquet")
+with open(DATA_DIR / "cfe_data.pkl", "rb") as _f:
+    _cfe_data = pickle.load(_f)
+all_deltas = _cfe_data["all_deltas"]
+X = _cfe_data["X"]
+pca_results = _cfe_data["pca_results"]
+indiv_cfe_batch = _cfe_data["indiv_cfe_batch"]
+
 lr_pipeline = joblib.load(MODELS_DIR / "a-lr.pkl")
 en_pipeline = joblib.load(MODELS_DIR / "a-en.pkl")
-batch_lr = joblib.load(DATA_DIR / "cfe_batch_lr_20.pkl")
-batch_en = joblib.load(DATA_DIR / "cfe_batch_en_20.pkl")
 
 # Expensive computation once at import time — callbacks only call the fast assembler
-_DATA = precompute_boundary_data(all_deltas, X, lr_pipeline, en_pipeline, batch_lr=batch_lr, batch_en=batch_en)
+_DATA = precompute_boundary_data(all_deltas, X, lr_pipeline, en_pipeline, indiv_cfe_batch=indiv_cfe_batch)
 
 # Traces with patient customdata: arrows (1,2,6,7), CFE markers (3,8), originals (4,9),
 # PCA scatter bg (14) and highlight (15) — indices shifted by the two legend dummy traces (10,11)

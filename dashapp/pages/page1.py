@@ -1,9 +1,9 @@
+import pickle
 import dash
 import numpy as np
 import plotly.graph_objects as go
 from dash import dcc, callback, Input, Output, ctx
 import dash_bootstrap_components as dbc
-import pandas as pd
 from pathlib import Path
 
 from components.figures import build_heatmap, build_scatter
@@ -19,7 +19,9 @@ dash.register_page(
 
 # Load data once at import time
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
-all_deltas = pd.read_parquet(DATA_DIR / "all_deltas.parquet", engine="fastparquet")
+with open(DATA_DIR / "cfe_data.pkl", "rb") as _f:
+    _cfe_data = pickle.load(_f)
+all_deltas = _cfe_data["all_deltas"]
 
 # Compute global scatter scales so axes and colourbar stay fixed across features
 norm_cols = [col for col in all_deltas.columns if col.endswith("_norm")]

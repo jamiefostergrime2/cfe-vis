@@ -266,8 +266,7 @@ def precompute_boundary_data(
     feature_x: str | None = None,
     feature_y: str | None = None,
     grid_n: int = 60,
-    batch_lr: list | None = None,
-    batch_en: list | None = None,
+    indiv_cfe_batch: pd.DataFrame | None = None,
 ) -> dict:
     """
     Run all expensive computation (grid prediction, CFE aggregation) once.
@@ -275,6 +274,10 @@ def precompute_boundary_data(
     Returns a plain dict consumed by assemble_boundary_fig. Separating this
     from the figure builder means model calls happen only at page load, not
     on every user interaction.
+
+    indiv_cfe_batch must have columns: patient_idx, model, orig_{feature},
+    cfe_{feature} for every feature in X.  It is produced by
+    process_cfe.compute_indiv_cfe_batch() and loaded from cfe_data.pkl.
     """
 
     # Auto-pick top-2 features by model disagreement (same logic as build_heatmap)
@@ -312,37 +315,38 @@ def precompute_boundary_data(
     z_en = en_pipeline.predict_proba(grid_df)[:, 1].reshape(grid_n, grid_n)
 
     # Patient original points
+    # patient_idx values are positional (from enumerate) — use iloc not loc,
+    # because X may have a non-sequential integer index from the source data.
     patients = np.sort(all_deltas["patient_idx"].unique())
-    orig_x = X.loc[patients, feature_x].values
-    orig_y = X.loc[patients, feature_y].values
+    X_pat = X.iloc[patients]
+    orig_x = X_pat[feature_x].values
+    orig_y = X_pat[feature_y].values
 
-    # Feature indices — shared by both the upper-plot means and the lower-left batch rows
-    feat_cols = list(X.columns)
-    feat_idx_x = feat_cols.index(feature_x)
-    feat_idx_y = feat_cols.index(feature_y)
-
-    # Upper-plot trajectory destinations: mean over the 20-CFE batch per patient per model.
-    # Batch arrays are absolute feature values, so the mean IS the destination coordinate.
-    # NaN is used when a patient's batch entry is absent; the existing finite-value filter
-    # in the axis-range block and _arrow_segments will exclude those patients.
+    # Upper-plot trajectory destinations: mean CFE per (patient, model).
+    # NaN when a patient has no batch entry — filtered by finite-value checks downstream.
     lr_cfe_x = np.full(len(patients), np.nan)
     lr_cfe_y = np.full(len(patients), np.nan)
     en_cfe_x = np.full(len(patients), np.nan)
     en_cfe_y = np.full(len(patients), np.nan)
 
-    for pat_pos in range(len(patients)):
-        if batch_lr is not None:
-            cfes = batch_lr[pat_pos]
-            if cfes:
-                mean_cfe = np.array(cfes).mean(axis=0)
-                lr_cfe_x[pat_pos] = mean_cfe[feat_idx_x]
-                lr_cfe_y[pat_pos] = mean_cfe[feat_idx_y]
-        if batch_en is not None:
-            cfes = batch_en[pat_pos]
-            if cfes:
-                mean_cfe = np.array(cfes).mean(axis=0)
-                en_cfe_x[pat_pos] = mean_cfe[feat_idx_x]
-                en_cfe_y[pat_pos] = mean_cfe[feat_idx_y]
+    if indiv_cfe_batch is not None:
+        mean_dest = (
+            indiv_cfe_batch
+            .groupby(["patient_idx", "model"])[[f"cfe_{feature_x}", f"cfe_{feature_y}"]]
+            .mean()
+        )
+        for pat_pos, pat_idx in enumerate(patients):
+            pat_idx = int(pat_idx)
+            try:
+                lr_cfe_x[pat_pos] = mean_dest.loc[(pat_idx, "logistic_regression"), f"cfe_{feature_x}"]
+                lr_cfe_y[pat_pos] = mean_dest.loc[(pat_idx, "logistic_regression"), f"cfe_{feature_y}"]
+            except KeyError:
+                pass
+            try:
+                en_cfe_x[pat_pos] = mean_dest.loc[(pat_idx, "elastic_net"), f"cfe_{feature_x}"]
+                en_cfe_y[pat_pos] = mean_dest.loc[(pat_idx, "elastic_net"), f"cfe_{feature_y}"]
+            except KeyError:
+                pass
 
     # Shared axis range: union of all finite points + grid bounds
     all_x = np.concatenate([orig_x, lr_cfe_x, en_cfe_x, [x_vals[0], x_vals[-1]]])
@@ -353,37 +357,27 @@ def precompute_boundary_data(
     y_range = [float(finite_y.min()) * 0.98, float(finite_y.max()) * 1.02]
 
     # Original class predictions — used for direction filter (0→1 vs 1→0)
-    lr_preds = lr_pipeline.predict(X.loc[patients]).astype(int)
-    en_preds = en_pipeline.predict(X.loc[patients]).astype(int)
+    lr_preds = lr_pipeline.predict(X_pat).astype(int)
+    en_preds = en_pipeline.predict(X_pat).astype(int)
 
-    # Individual CFE batch: all 20 CFEs per patient per model for the lower-left subplot
-    indiv_cfe_batch = None
-    if batch_lr is not None or batch_en is not None:
-        rows = []
-        for pat_pos, pat_idx in enumerate(patients):
-            orig_x_val = float(X.loc[pat_idx, feature_x])
-            orig_y_val = float(X.loc[pat_idx, feature_y])
-            if batch_lr is not None:
-                for cfe_arr in (batch_lr[pat_pos] or []):
-                    rows.append({
-                        "patient_idx": int(pat_idx),
-                        "model": "logistic_regression",
-                        "orig_x": orig_x_val,
-                        "orig_y": orig_y_val,
-                        "cfe_x": float(cfe_arr[feat_idx_x]),
-                        "cfe_y": float(cfe_arr[feat_idx_y]),
-                    })
-            if batch_en is not None:
-                for cfe_arr in (batch_en[pat_pos] or []):
-                    rows.append({
-                        "patient_idx": int(pat_idx),
-                        "model": "elastic_net",
-                        "orig_x": orig_x_val,
-                        "orig_y": orig_y_val,
-                        "cfe_x": float(cfe_arr[feat_idx_x]),
-                        "cfe_y": float(cfe_arr[feat_idx_y]),
-                    })
-        indiv_cfe_batch = pd.DataFrame(rows)
+    # Select the two display features from the pre-built batch and rename to
+    # orig_x/orig_y/cfe_x/cfe_y so assemble_boundary_fig needs no changes.
+    plot_batch = None
+    if indiv_cfe_batch is not None:
+        plot_batch = (
+            indiv_cfe_batch[[
+                "patient_idx", "model",
+                f"orig_{feature_x}", f"orig_{feature_y}",
+                f"cfe_{feature_x}", f"cfe_{feature_y}",
+            ]]
+            .rename(columns={
+                f"orig_{feature_x}": "orig_x",
+                f"orig_{feature_y}": "orig_y",
+                f"cfe_{feature_x}": "cfe_x",
+                f"cfe_{feature_y}": "cfe_y",
+            })
+            .copy()
+        )
 
     return dict(
         feature_x=feature_x,
@@ -403,7 +397,7 @@ def precompute_boundary_data(
         en_preds=en_preds,
         x_range=x_range,
         y_range=y_range,
-        indiv_cfe_batch=indiv_cfe_batch,
+        indiv_cfe_batch=plot_batch,
     )
 
 
