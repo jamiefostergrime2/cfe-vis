@@ -1,22 +1,5 @@
-body {
-    background-color: #2b2b2b;
-    color: #d4d4d4;
-}
-
-/* Pill-style nav links */
-.navbar .nav-link {
-    background-color: rgba(255, 255, 255, 0.12);
-    border-radius: 20px;
-    padding: 5px 16px !important;
-    margin: 0 4px;
-    transition: background-color 0.15s ease;
-}
-
-.navbar .nav-link:hover {
-    background-color: rgba(255, 255, 255, 0.25);
-}
-
-.navbar .nav-link.active {
-    background-color: rgba(255, 255, 255, 0.35);
-    font-weight: 600;
+/* Pointer cursor on scatter marker hover for clickable traces */
+.js-plotly-plot .scatter .point path,
+.js-plotly-plot .scatter .point circle {
+    cursor: pointer;
 }

@@ -544,9 +544,10 @@ def assemble_boundary_fig(
         rows=2, cols=2,
         subplot_titles=[
             disp_a, disp_b,
-            "Individual counterfactuals (both models)", "",
+            "Individual counterfactuals (both models)",
+            "Patient overview: directional vs outcome disagreement",
         ],
-        horizontal_spacing=0.04,
+        horizontal_spacing=0.10,
         vertical_spacing=0.10,
         row_heights=[0.5, 0.5],
     )
@@ -716,7 +717,7 @@ def assemble_boundary_fig(
 
         a_full = a_pca.loc[shared_pca]
         b_full = b_pca.loc[shared_pca]
-        confidence_diff_full = a_full["mean_confidence"].values - b_full["mean_confidence"].values
+        confidence_diff_full = b_full["mean_confidence"].values - a_full["mean_confidence"].values
         x_max_pca = (
             max(abs(float(confidence_diff_full.min())), abs(float(confidence_diff_full.max())))
             if len(confidence_diff_full) > 0 else 0.5
@@ -727,21 +728,38 @@ def assemble_boundary_fig(
 
         dots = np.clip(np.abs((a_pc1 * b_pc1).sum(axis=1)), -1.0, 1.0)
         pc1_angle = np.degrees(np.arccos(dots))
-        confidence_diff = a_f["mean_confidence"].values - b_f["mean_confidence"].values
-        reliability = np.minimum(a_f["pc1_ratio"].values, b_f["pc1_ratio"].values)
+        confidence_diff = b_f["mean_confidence"].values - a_f["mean_confidence"].values
+        a_evr = a_f["pc1_ratio"].values
+        b_evr = b_f["pc1_ratio"].values
+        reliability = np.minimum(a_evr, b_evr)
+
+        evr_min = float(reliability.min()) if len(reliability) > 0 else 0.0
+        evr_max = float(reliability.max()) if len(reliability) > 0 else 1.0
+        evr_range = evr_max - evr_min if evr_max > evr_min else 1.0
+
+        hover_pca = (
+            f"Patient: %{{customdata[1]}}<br>"
+            f"Confidence diff ({disp_b}−{disp_a}): %{{x:.3f}}<br>"
+            "PC1 angle: %{y:.1f}°<br>"
+            f"EVR PC1 {disp_a}: %{{customdata[2]:.3f}}<br>"
+            f"EVR PC1 {disp_b}: %{{customdata[3]:.3f}}"
+            "<extra></extra>"
+        )
 
         bg_x, bg_y, bg_opacities, bg_cdata = [], [], [], []
         hl_x, hl_y, hl_cdata = [], [], []
         for i, p in enumerate(shared_f.tolist()):
+            t = float(np.clip((reliability[i] - evr_min) / evr_range, 0.0, 1.0))
+            opacity = 0.25 + 0.75 * t
             if selected_patient is not None and p == selected_patient:
                 hl_x.append(float(confidence_diff[i]))
                 hl_y.append(float(pc1_angle[i]))
-                hl_cdata.append([p, p + 1])
+                hl_cdata.append([p, p + 1, float(a_evr[i]), float(b_evr[i])])
             else:
                 bg_x.append(float(confidence_diff[i]))
                 bg_y.append(float(pc1_angle[i]))
-                bg_opacities.append(float(0.3 + 0.7 * reliability[i]))
-                bg_cdata.append([p, p + 1])
+                bg_opacities.append(opacity)
+                bg_cdata.append([p, p + 1, float(a_evr[i]), float(b_evr[i])])
 
         fig.add_trace(
             go.Scatter(
@@ -754,12 +772,7 @@ def assemble_boundary_fig(
                     line=dict(width=0.5, color="grey"),
                 ),
                 customdata=bg_cdata,
-                hovertemplate=(
-                    f"Patient: %{{customdata[1]}}<br>"
-                    f"Mean confidence diff ({disp_a}−{disp_b}): %{{x:.3f}}<br>"
-                    "PC1 angle: %{y:.1f}°"
-                    "<extra></extra>"
-                ),
+                hovertemplate=hover_pca,
                 showlegend=False,
             ),
             row=2, col=2,
@@ -769,47 +782,93 @@ def assemble_boundary_fig(
                 x=hl_x, y=hl_y,
                 mode="markers",
                 marker=dict(
-                    size=16,
-                    color="#ffffff",
+                    size=10,
+                    color="rgba(0,0,0,0)",
                     opacity=1.0,
-                    line=dict(width=2, color="white"),
+                    line=dict(width=2, color=TEXT_COLOR),
                 ),
                 customdata=hl_cdata,
-                hovertemplate=(
-                    f"Patient: %{{customdata[1]}}<br>"
-                    f"Mean confidence diff ({disp_a}−{disp_b}): %{{x:.3f}}<br>"
-                    "PC1 angle: %{y:.1f}°"
-                    "<extra></extra>"
-                ),
+                hovertemplate=hover_pca,
                 showlegend=False,
             ),
             row=2, col=2,
         )
 
         fig.update_xaxes(
-            title_text=f"← {disp_b}'s CFEs land deeper   |   {disp_a}'s CFEs land deeper →",
+            title_text=f"Difference in mean CFE predicted probability ({disp_b} − {disp_a})",
             range=[-x_max_pca * 1.1, x_max_pca * 1.1],
-            zeroline=True, zerolinecolor=GRID_COLOR, zerolinewidth=1,
+            zeroline=False,
             row=2, col=2,
         )
         fig.update_yaxes(title_text="Angle between CFE PC1 vectors (°)", range=[0, 92], row=2, col=2)
-
         fig.add_annotation(
-            x=-0.2, y=85, ax=-0.2, ay=15,
-            xref="x4", yref="y4", axref="x4", ayref="y4",
-            arrowhead=2, arrowside="end+start", arrowsize=2,
-            arrowcolor=GRID_COLOR,
+            text=f"← {disp_a}'s CFEs more confident   |   {disp_b}'s CFEs more confident →",
+            xref="x4 domain", yref="paper",
+            x=0.5, y=-0.065,
+            showarrow=False,
+            font=dict(color=GRID_COLOR, size=10),
+            xanchor="center",
+            yanchor="top",
+        )
+
+        # Reference lines rendered below data points
+        fig.add_shape(
+            type="line",
+            x0=0, y0=0, x1=0, y1=92,
+            xref="x4", yref="y4",
+            line=dict(color="rgba(180,180,180,0.35)", width=0.5, dash="dash"),
+            layer="below",
+        )
+        fig.add_shape(
+            type="line",
+            x0=-x_max_pca * 1.1, y0=45, x1=x_max_pca * 1.1, y1=45,
+            xref="x4", yref="y4",
+            line=dict(color="rgba(180,180,180,0.35)", width=0.5, dash="dash"),
+            layer="below",
+        )
+        # Arrow + labels in inter-subplot gap (paper coords), parallel to y-axis.
+        # axref/ayref don't support "paper" — draw shaft as a shape,
+        # arrowheads as pixel-offset annotations.
+        # h_spacing=0.10 → gap x=[0.45, 0.55]; row2 paper y≈[0.00, 0.45]
+        fig.add_shape(
+            type="line",
+            x0=0.505, y0=0.10, x1=0.505, y1=0.38,
+            xref="paper", yref="paper",
+            line=dict(color=GRID_COLOR, width=1),
+        )
+        fig.add_annotation(
+            x=0.505, y=0.38,
+            ax=0, ay=14,
+            xref="paper", yref="paper",
+            axref="pixel", ayref="pixel",
+            arrowhead=2, arrowside="end", arrowsize=1.5, arrowcolor=GRID_COLOR,
             showarrow=True, text="",
         )
         fig.add_annotation(
-            x=-0.175, y=60, xref="x4", yref="y4",
-            text="Divergent PC1 of CFEs",
-            showarrow=False, font=dict(color=TEXT_COLOR, size=12), xanchor="left",
+            x=0.505, y=0.10,
+            ax=0, ay=-14,
+            xref="paper", yref="paper",
+            axref="pixel", ayref="pixel",
+            arrowhead=2, arrowside="end", arrowsize=1.5, arrowcolor=GRID_COLOR,
+            showarrow=True, text="",
         )
         fig.add_annotation(
-            x=-0.175, y=35, xref="x4", yref="y4",
-            text="Aligned PC1 of CFEs",
-            showarrow=False, font=dict(color=TEXT_COLOR, size=12), xanchor="left",
+            x=0.493, y=0.29,
+            xref="paper", yref="paper",
+            text="Divergent",
+            textangle=-90,
+            showarrow=False,
+            font=dict(color=TEXT_COLOR, size=9),
+            xanchor="center",
+        )
+        fig.add_annotation(
+            x=0.493, y=0.16,
+            xref="paper", yref="paper",
+            text="Aligned",
+            textangle=-90,
+            showarrow=False,
+            font=dict(color=TEXT_COLOR, size=9),
+            xanchor="center",
         )
     else:
         for _ in range(2):
@@ -895,10 +954,10 @@ def assemble_boundary_fig(
     fig.update_layout(
         template=TEMPLATE,
         autosize=True,
-        title=f"Decision boundaries: {feature_x} vs {feature_y}",
+        title=f"Mean CFE paths on decision boundary slice: {feature_x} vs {feature_y}",
         showlegend=True,
         legend=dict(x=1.02, y=1),
-        margin=dict(b=100),
+        margin=dict(b=130),
         xaxis2=dict(matches="x"),
         yaxis2=dict(matches="y"),
         xaxis3=dict(matches="x"),
@@ -908,11 +967,36 @@ def assemble_boundary_fig(
 
     fig.layout.annotations[0].font.color = color_a
     fig.layout.annotations[1].font.color = color_b
+    fig.layout.annotations[3].font.size = 13
+    fig.layout.annotations[3].font.weight = 700
+
+    # Italic subtitle below patient overview panel title
+    title_ann = fig.layout.annotations[3]
+    fig.add_annotation(
+        x=title_ann.x + 0.118,
+        y=title_ann.y - 0.032,
+        xref="paper", yref="paper",
+        text="<i>Click a point to inspect that patient</i>",
+        showarrow=False,
+        font=dict(color=GRID_COLOR, size=10),
+        xanchor="center",
+        yanchor="top",
+    )
+
+    # Subtle border-left priority cue for the patient overview panel
+    # h_spacing=0.10 → col2 domain x=[0.55, 1.0]; row2 y=[0.0, 0.45]
+    fig.add_shape(
+        type="line",
+        x0=0.55, y0=0.0, x1=0.55, y1=0.45,
+        xref="paper", yref="paper",
+        line=dict(color="rgba(128,128,128,0.40)", width=1),
+        layer="below",
+    )
 
     fig.add_annotation(
         text="Boundaries computed with all other features held at population median.",
         xref="paper", yref="paper",
-        x=0.5, y=-0.07,
+        x=0.5, y=-0.10,
         showarrow=False,
         font=dict(color=TEXT_COLOR, size=11),
     )

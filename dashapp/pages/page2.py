@@ -108,7 +108,7 @@ def _make_model_options(pair_name: str) -> list:
     ]
 
 
-_DROPDOWN_STYLE = {"width": "130px", "color": "#000", "fontSize": "13px"}
+_SELECT_STYLE = {"width": "130px"}
 
 
 def layout():
@@ -154,12 +154,12 @@ def layout():
             ], width="auto", className="d-flex align-items-center ms-3"),
             dbc.Col([
                 dbc.Label("X axis:", className="me-2 mb-0"),
-                dcc.Dropdown(
+                dbc.Select(
                     id="p2-feature-x",
                     options=_FEATURE_OPTIONS,
                     value=fx,
-                    clearable=False,
-                    style=_DROPDOWN_STYLE,
+                    size="sm",
+                    style=_SELECT_STYLE,
                 ),
             ], width="auto", className="d-flex align-items-center ms-3"),
             dbc.Col([
@@ -167,15 +167,15 @@ def layout():
             ], width="auto", className="d-flex align-items-center ms-2"),
             dbc.Col([
                 dbc.Label("Y axis:", className="me-2 mb-0"),
-                dcc.Dropdown(
+                dbc.Select(
                     id="p2-feature-y",
                     options=_FEATURE_OPTIONS,
                     value=fy,
-                    clearable=False,
-                    style=_DROPDOWN_STYLE,
+                    size="sm",
+                    style=_SELECT_STYLE,
                 ),
             ], width="auto", className="d-flex align-items-center ms-2"),
-        ], className="mb-2 align-items-center"),
+        ], className="mb-2 align-items-baseline"),
 
         dcc.Graph(
             id="p2-boundary-graph",
