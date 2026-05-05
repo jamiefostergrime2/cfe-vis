@@ -12,8 +12,8 @@ from components.theme import TEMPLATE
 dash.register_page(
     __name__,
     path="/page-1",
-    name="Page 1",
-    title="Page 1 | CFE-Vis",
+    name="Disagreement Overview",
+    title="Disagreement Overview | BIOFLARE-CFE-vis",
     order=2,
 )
 

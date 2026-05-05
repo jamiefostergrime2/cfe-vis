@@ -17,8 +17,8 @@ from components.figures import (
 dash.register_page(
     __name__,
     path="/page-2",
-    name="Decision Boundaries",
-    title="Decision Boundaries | CFE-Vis",
+    name="Disagreement Geometry",
+    title="Disagreement Geometry | BIOFLARE-CFE-vis",
     order=3,
 )
 
@@ -153,28 +153,30 @@ def layout():
                 ),
             ], width="auto", className="d-flex align-items-center ms-3"),
             dbc.Col([
-                dbc.Label("X axis:", className="me-2 mb-0"),
-                dbc.Select(
-                    id="p2-feature-x",
-                    options=_FEATURE_OPTIONS,
-                    value=fx,
-                    size="sm",
-                    style=_SELECT_STYLE,
-                ),
-            ], width="auto", className="d-flex align-items-center ms-3"),
+                dbc.InputGroup([
+                    dbc.InputGroupText("X axis:"),
+                    dbc.Select(
+                        id="p2-feature-x",
+                        options=_FEATURE_OPTIONS,
+                        value=fx,
+                        style=_SELECT_STYLE,
+                    ),
+                ], size="sm"),
+            ], width="auto", className="ms-3"),
             dbc.Col([
                 dbc.Label("vs", className="mb-0"),
             ], width="auto", className="d-flex align-items-center ms-2"),
             dbc.Col([
-                dbc.Label("Y axis:", className="me-2 mb-0"),
-                dbc.Select(
-                    id="p2-feature-y",
-                    options=_FEATURE_OPTIONS,
-                    value=fy,
-                    size="sm",
-                    style=_SELECT_STYLE,
-                ),
-            ], width="auto", className="d-flex align-items-center ms-2"),
+                dbc.InputGroup([
+                    dbc.InputGroupText("Y axis:"),
+                    dbc.Select(
+                        id="p2-feature-y",
+                        options=_FEATURE_OPTIONS,
+                        value=fy,
+                        style=_SELECT_STYLE,
+                    ),
+                ], size="sm"),
+            ], width="auto", className="ms-2"),
         ], className="mb-2 align-items-baseline"),
 
         dcc.Graph(

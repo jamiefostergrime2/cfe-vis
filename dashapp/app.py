@@ -22,25 +22,39 @@ app = dash.Dash(
 
 navbar = dbc.Navbar(
     dbc.Container([
-        dbc.NavbarBrand("CFE-Vis", href="/"),
+        dbc.NavbarBrand("BIOFLARE-CFE-vis", href="/", className="fw-semibold"),
         dbc.NavbarToggler(id="navbar-toggler"),
         dbc.Collapse(
             dbc.Nav([
-                dbc.NavLink("Page 1", href="/page-1", active="exact"),
-                dbc.NavLink("Page 2", href="/page-2", active="exact"),
-                dbc.NavLink("Page 3", href="/page-3", active="exact"),
-                dbc.NavLink("Page 4", href="/page-4", active="exact"),
-                dbc.NavLink("Page 5", href="/page-5", active="exact"),
+                dbc.NavLink(
+                    "Disagreement Overview",
+                    href="/page-1",
+                    active="exact",
+                    style={"fontSize": "15px", "padding": "0.6rem 1.1rem"},
+                ),
+                dbc.NavLink(
+                    "Disagreement Geometry",
+                    href="/page-2",
+                    active="exact",
+                    style={"fontSize": "15px", "padding": "0.6rem 1.1rem"},
+                ),
             ], navbar=True, className="mx-auto"),
             id="navbar-collapse", navbar=True,
         ),
-        dcc.Dropdown(
-            id="pair-dropdown",
-            options=[{"label": p, "value": p} for p in _PAIR_NAMES],
-            value=_DEFAULT_PAIR,
-            clearable=False,
-            style={"width": "180px", "color": "#000", "fontSize": "13px"},
-        ),
+        html.Div([
+            html.Span(
+                "Model selector:",
+                className="text-light me-2",
+                style={"fontSize": "13px", "whiteSpace": "nowrap"},
+            ),
+            dcc.Dropdown(
+                id="pair-dropdown",
+                options=[{"label": p, "value": p} for p in _PAIR_NAMES],
+                value=_DEFAULT_PAIR,
+                clearable=False,
+                style={"width": "180px", "color": "#000", "fontSize": "13px"},
+            ),
+        ], className="d-flex align-items-center"),
     ], fluid=True),
     color="#2b2b2b", dark=True, sticky="top",
 )
