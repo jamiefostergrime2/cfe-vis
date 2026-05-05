@@ -31,6 +31,12 @@ CACHE_EN = DATA_DIR / "cfe_batch_en.pkl"
 CACHE_LR_20 = DATA_DIR / "cfe_batch_lr_20.pkl"
 CACHE_EN_20 = DATA_DIR / "cfe_batch_en_20.pkl"
 
+MODEL_AC_SVM_PATH = MODELS_DIR / "ac-svm.pkl"
+SETUP_AC_SVM_JSON = MODELS_DIR / "ac-svm.json"
+DATA_AC_PATH = DATA_DIR / "ac.pkl.gz"
+
+CACHE_AC_SVM_20 = DATA_DIR / "cfe_batch_ac_svm_20.pkl"
+
 
 def load_data():
     """
@@ -59,6 +65,36 @@ def load_data():
 
     feature_cols = [col for col in df.columns if col != "outcome"]
     return pipeline_lr, pipeline_en, df, feature_cols
+
+
+def load_ac_data():
+    """
+    Load the AC-SVM model and the AC dataset.
+
+    The AC dataset has all features pre-scaled to [0, 1] and no _id columns.
+    y labels are read from the AC-SVM setup JSON.
+
+    Returns
+    -------
+    ac_svm       : sklearn SVC  (probability=True, expects 25 pre-scaled features)
+    df           : pd.DataFrame (features + 'outcome', all 25 AC features)
+    feature_cols : list[str]
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ac_svm = joblib.load(MODEL_AC_SVM_PATH)
+
+    data = pd.read_pickle(DATA_AC_PATH)
+
+    with open(SETUP_AC_SVM_JSON) as f:
+        setup = json.load(f)
+    y_values = setup["experiment_setup"]["y"]
+
+    df = data.loc[:, [col for col in data.columns if "_id" not in col]]
+    df["outcome"] = y_values
+
+    feature_cols = [col for col in df.columns if col != "outcome"]
+    return ac_svm, df, feature_cols
 
 
 def build_dice_objects(df, pipeline_lr, pipeline_en):
@@ -168,12 +204,12 @@ def print_summary(cfe_lr: list, cfe_en: list) -> None:
 
 
 def generate_20_cfe_batch() -> None:
-    """Generate and cache 20-CFE batches for both models."""
+    """Generate and cache 20-CFE batches for LR, EN, and AC-SVM."""
     print("Loading data and models...")
     pipeline_lr, pipeline_en, df, feature_cols = load_data()
     X = df[feature_cols]
 
-    print("Building DiCE explainers...")
+    print("Building DiCE explainers (LR + EN)...")
     exp_lr, exp_en = build_dice_objects(df, pipeline_lr, pipeline_en)
 
     print("Logistic Regression (20 CFEs):")
@@ -191,6 +227,25 @@ def generate_20_cfe_batch() -> None:
         print(f"  Done. {sum(r is not None for r in cfe_en)}/{len(cfe_en)} succeeded.")
 
     print_summary(cfe_lr, cfe_en)
+
+    print("\nAC-SVM (20 CFEs):")
+    cfe_ac_svm = load_cache(CACHE_AC_SVM_20)
+    if cfe_ac_svm is None:
+        print("  Loading AC data and model...")
+        ac_svm, df_ac, feature_cols_ac = load_ac_data()
+
+        dice_data_ac = dice_ml.Data(
+            dataframe=df_ac,
+            continuous_features=[c for c in df_ac.columns if c != "outcome"],
+            outcome_name="outcome",
+        )
+        dice_model_ac = dice_ml.Model(model=ac_svm, backend="sklearn")
+        exp_ac = dice_ml.Dice(dice_data_ac, dice_model_ac, method="genetic")
+
+        X_ac = df_ac[feature_cols_ac]
+        print("  Generating...")
+        cfe_ac_svm = generate_batch_cfe(exp_ac, X_ac, feature_cols_ac, CACHE_AC_SVM_20, total_cfs=20)
+        print(f"  Done. {sum(r is not None for r in cfe_ac_svm)}/{len(cfe_ac_svm)} succeeded.")
 
 
 def main() -> None:

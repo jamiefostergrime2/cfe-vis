@@ -8,6 +8,7 @@ Usage:
     from components.figures import (
         build_heatmap, build_scatter, build_bar,
         precompute_boundary_data, assemble_boundary_fig,
+        make_predict_fns,
     )
 """
 
@@ -18,8 +19,73 @@ from plotly.subplots import make_subplots
 
 from components.theme import TEMPLATE, TEXT_COLOR, GRID_COLOR, CHART_HEIGHT
 
+_MODEL_COLORS = {
+    "logistic_regression": "#2a9d8f",
+    "elastic_net": "#e76f51",
+    "ac_svm": "#6a5acd",
+}
 
-def build_heatmap(all_deltas: pd.DataFrame, condensed: bool = False) -> go.Figure:
+_MODEL_DISPLAY = {
+    "logistic_regression": "LR",
+    "elastic_net": "EN",
+    "ac_svm": "AC-SVM",
+}
+
+_DEFAULT_COLOR_A = "#2a9d8f"
+_DEFAULT_COLOR_B = "#e76f51"
+
+
+def make_predict_fns(spec: dict, pipeline, base_feature_cols: list):
+    """
+    Build (predict_proba_fn, predict_class_fn) from a model spec dict.
+
+    Both functions accept a DataFrame with columns matching base_feature_cols in
+    raw scale, and return numpy arrays (float proba / int class).
+    """
+    full_cols = spec["full_feature_cols"]
+
+    if not spec["needs_scale_base"]:
+        fill = spec["feature_fill_raw"]
+
+        def _full(X_base_df):
+            X = X_base_df[base_feature_cols].copy()
+            for feat, val in fill.items():
+                X[feat] = val
+            return X[full_cols]
+
+        def predict_proba(X_base_df):
+            return pipeline.predict_proba(_full(X_base_df))
+
+        def predict_class(X_base_df):
+            return pipeline.predict(_full(X_base_df)).astype(int)
+    else:
+        data_min = np.array(spec["scaler_data_min"])
+        data_range = np.array(spec["scaler_data_range"])
+        extra_fill = spec["extra_feature_fill"]
+
+        def _full(X_base_df):
+            raw = X_base_df[base_feature_cols].values.astype(float)
+            scaled = (raw - data_min) / data_range
+            X = pd.DataFrame(scaled, columns=base_feature_cols)
+            for feat, val in extra_fill.items():
+                X[feat] = val
+            return X[full_cols]
+
+        def predict_proba(X_base_df):
+            return pipeline.predict_proba(_full(X_base_df))
+
+        def predict_class(X_base_df):
+            return pipeline.predict(_full(X_base_df)).astype(int)
+
+    return predict_proba, predict_class
+
+
+def build_heatmap(
+    all_deltas: pd.DataFrame,
+    condensed: bool = False,
+    model_a_name: str = "logistic_regression",
+    model_b_name: str = "elastic_net",
+) -> go.Figure:
     """
     Divergence heatmap: every patient × every feature, or a single-row summary.
 
@@ -31,36 +97,35 @@ def build_heatmap(all_deltas: pd.DataFrame, condensed: bool = False) -> go.Figur
 
     norm_cols = [col for col in all_deltas.columns if col.endswith("_norm")]
 
-    lr_avg = (all_deltas[all_deltas["model"] == "logistic_regression"]
-              .groupby("patient_idx")[norm_cols].mean())
-    en_avg = (all_deltas[all_deltas["model"] == "elastic_net"]
-              .groupby("patient_idx")[norm_cols].mean())
+    a_avg = (all_deltas[all_deltas["model"] == model_a_name]
+             .groupby("patient_idx")[norm_cols].mean())
+    b_avg = (all_deltas[all_deltas["model"] == model_b_name]
+             .groupby("patient_idx")[norm_cols].mean())
 
-    # Guard against patients where one model failed — keeps indices aligned
-    shared = lr_avg.index.intersection(en_avg.index)
-    lr_avg = lr_avg.loc[shared]
-    en_avg = en_avg.loc[shared]
+    shared = a_avg.index.intersection(b_avg.index)
+    a_avg = a_avg.loc[shared]
+    b_avg = b_avg.loc[shared]
 
-    divergence = (en_avg - lr_avg).abs()
+    divergence = (b_avg - a_avg).abs()
 
-    # Sort columns by total disagreement (most disagreed features on the left)
     col_order = divergence.sum().sort_values(ascending=False).index
     divergence = divergence[col_order]
 
-    # Clean feature labels: "acpa_norm" → "acpa"
     feature_labels = [col.replace("_norm", "") for col in col_order]
+
+    disp_a = _MODEL_DISPLAY.get(model_a_name, model_a_name)
+    disp_b = _MODEL_DISPLAY.get(model_b_name, model_b_name)
 
     if condensed:
         z = divergence.mean(axis=0).values.reshape(1, -1)
         y_labels = ["Mean disagreement"]
-        title = "Feature disagreement summary (mean across patients)"
+        title = f"{disp_a} vs {disp_b}: feature disagreement summary (mean across patients)"
         yaxis_cfg = dict(title="", showticklabels=False)
     else:
-        # Sort rows by total disagreement (most disagreed patients at the top)
         divergence = divergence.loc[divergence.sum(axis=1).sort_values(ascending=True).index]
         z = divergence.values
         y_labels = [f"Patient {i+1}" for i in divergence.index]
-        title = "Where do Logistic Regression and Elastic Net diverge?"
+        title = f"Where do {disp_a} and {disp_b} diverge?"
         yaxis_cfg = dict(
             title=dict(text="Patients (Least to most model disagreement)", standoff=10),
             showticklabels=False,
@@ -101,9 +166,11 @@ def build_scatter(
     height: int = CHART_HEIGHT,
     axis_range: list | None = None,
     cmax: float | None = None,
+    model_a_name: str = "logistic_regression",
+    model_b_name: str = "elastic_net",
 ) -> go.Figure:
     """
-    Scatter plot: LR delta vs EN delta across all patients.
+    Scatter plot: model A delta vs model B delta across all patients.
 
     Parameters
     ----------
@@ -116,39 +183,42 @@ def build_scatter(
                  consistent across features. If None, uses per-feature max.
     """
 
+    disp_a = _MODEL_DISPLAY.get(model_a_name, model_a_name)
+    disp_b = _MODEL_DISPLAY.get(model_b_name, model_b_name)
+
     if isinstance(feature, list):
         norm_cols = [f"{f}_norm" for f in feature]
-        lr_deltas = (all_deltas[all_deltas["model"] == "logistic_regression"]
-                     .groupby("patient_idx")[norm_cols].mean().mean(axis=1))
-        en_deltas = (all_deltas[all_deltas["model"] == "elastic_net"]
-                     .groupby("patient_idx")[norm_cols].mean().mean(axis=1))
+        a_deltas = (all_deltas[all_deltas["model"] == model_a_name]
+                    .groupby("patient_idx")[norm_cols].mean().mean(axis=1))
+        b_deltas = (all_deltas[all_deltas["model"] == model_b_name]
+                    .groupby("patient_idx")[norm_cols].mean().mean(axis=1))
         title = f"How do the models disagree across the top {len(feature)} features?"
         axis_label = f"Mean normalised delta (top {len(feature)} features)"
-        x_label = f"LR: {axis_label}"
-        y_label = f"EN: {axis_label}"
+        x_label = f"{disp_a}: {axis_label}"
+        y_label = f"{disp_b}: {axis_label}"
     else:
         norm_col = f"{feature}_norm"
-        lr_deltas = (all_deltas[all_deltas["model"] == "logistic_regression"]
-                     .groupby("patient_idx")[norm_col].mean())
-        en_deltas = (all_deltas[all_deltas["model"] == "elastic_net"]
-                     .groupby("patient_idx")[norm_col].mean())
+        a_deltas = (all_deltas[all_deltas["model"] == model_a_name]
+                    .groupby("patient_idx")[norm_col].mean())
+        b_deltas = (all_deltas[all_deltas["model"] == model_b_name]
+                    .groupby("patient_idx")[norm_col].mean())
         title = f"How do the models disagree about {feature}?"
-        x_label = "Logistic Regression: Normalised delta"
-        y_label = "Elastic Net: Normalised delta"
+        x_label = f"{disp_a}: Normalised delta"
+        y_label = f"{disp_b}: Normalised delta"
 
-    shared = lr_deltas.index.intersection(en_deltas.index)
-    lr_vals = lr_deltas.loc[shared].values
-    en_vals = en_deltas.loc[shared].values
+    shared = a_deltas.index.intersection(b_deltas.index)
+    a_vals = a_deltas.loc[shared].values
+    b_vals = b_deltas.loc[shared].values
     patient_indices = shared.values
 
-    distance_from_diagonal = np.abs(en_vals - lr_vals) / np.sqrt(2)
+    distance_from_diagonal = np.abs(b_vals - a_vals) / np.sqrt(2)
 
     effective_cmax = cmax if cmax is not None else distance_from_diagonal.max()
 
     fig = go.Figure(
         data=go.Scatter(
-            x=lr_vals,
-            y=en_vals,
+            x=a_vals,
+            y=b_vals,
             mode="markers",
             marker=dict(
                 size=8,
@@ -165,8 +235,8 @@ def build_scatter(
 
             hovertemplate=(
                 "Patient: %{customdata}<br>"
-                "LR delta: %{x:.3f}<br>"
-                "EN delta: %{y:.3f}"
+                f"{disp_a} delta: " + "%{x:.3f}<br>"
+                f"{disp_b} delta: " + "%{y:.3f}"
                 "<extra></extra>"
             ),
         ),
@@ -178,9 +248,8 @@ def build_scatter(
         ),
     )
 
-    diag_bound = axis_range[1] if axis_range is not None else np.abs(np.concatenate([lr_vals, en_vals])).max()
+    diag_bound = axis_range[1] if axis_range is not None else np.abs(np.concatenate([a_vals, b_vals])).max()
 
-    # Diagonal reference line
     fig.add_shape(
         type="line",
         x0=-diag_bound, y0=-diag_bound,
@@ -188,7 +257,6 @@ def build_scatter(
         line=dict(color="grey", dash="dash", width=1),
     )
 
-    # Zero reference lines
     fig.add_hline(y=0, line=dict(color=GRID_COLOR, width=0.5))
     fig.add_vline(x=0, line=dict(color=GRID_COLOR, width=0.5))
 
@@ -204,14 +272,12 @@ def build_bar(
     patient: int,
 ) -> go.Figure:
     """
-    Bar chart: original value vs LR and EN counterfactual values
+    Bar chart: original value vs model A and model B counterfactual values
     for one patient and one feature.
-
     """
 
     original_val = X[feature].iloc[patient]
 
-    # Reconstruct counterfactual values from original + raw delta
     raw_col = f"{feature}_raw"
 
     lr_cf_val = original_val + (all_deltas[
@@ -249,7 +315,7 @@ def build_bar(
         ),
         layout=go.Layout(
             template=TEMPLATE,
-            height = CHART_HEIGHT,
+            height=CHART_HEIGHT,
             title=f"Patient {patient}: Counterfactual changes to {feature}",
             yaxis=dict(title=f"{feature} value"),
         ),
@@ -261,8 +327,12 @@ def build_bar(
 def precompute_boundary_data(
     all_deltas: pd.DataFrame,
     X: pd.DataFrame,
-    lr_pipeline,
-    en_pipeline,
+    predict_proba_a,
+    predict_class_a,
+    predict_proba_b,
+    predict_class_b,
+    model_a_name: str = "logistic_regression",
+    model_b_name: str = "elastic_net",
     feature_x: str | None = None,
     feature_y: str | None = None,
     grid_n: int = 60,
@@ -272,28 +342,30 @@ def precompute_boundary_data(
     Run all expensive computation (grid prediction, CFE aggregation) once.
 
     Returns a plain dict consumed by assemble_boundary_fig. Separating this
-    from the figure builder means model calls happen only at page load, not
-    on every user interaction.
+    from the figure builder means model calls happen only at page load / pair
+    switch, not on every user interaction.
+
+    predict_proba_a / predict_proba_b accept a DataFrame with the same columns
+    as X (base features in raw scale) and return (n, 2) probability arrays.
+    predict_class_a / predict_class_b return integer class arrays.
 
     indiv_cfe_batch must have columns: patient_idx, model, orig_{feature},
-    cfe_{feature} for every feature in X.  It is produced by
-    process_cfe.compute_indiv_cfe_batch() and loaded from cfe_data.pkl.
+    cfe_{feature} for every feature in X.
     """
 
-    # Auto-pick top-2 features by model disagreement (same logic as build_heatmap)
+    # Auto-pick top-2 features by model disagreement
     if feature_x is None or feature_y is None:
         norm_cols = [c for c in all_deltas.columns if c.endswith("_norm")]
-        lr_avg = (all_deltas[all_deltas["model"] == "logistic_regression"]
-                  .groupby("patient_idx")[norm_cols].mean())
-        en_avg = (all_deltas[all_deltas["model"] == "elastic_net"]
-                  .groupby("patient_idx")[norm_cols].mean())
-        shared = lr_avg.index.intersection(en_avg.index)
-        divergence = (en_avg.loc[shared] - lr_avg.loc[shared]).abs()
+        a_avg = (all_deltas[all_deltas["model"] == model_a_name]
+                 .groupby("patient_idx")[norm_cols].mean())
+        b_avg = (all_deltas[all_deltas["model"] == model_b_name]
+                 .groupby("patient_idx")[norm_cols].mean())
+        shared = a_avg.index.intersection(b_avg.index)
+        divergence = (b_avg.loc[shared] - a_avg.loc[shared]).abs()
         top2 = divergence.sum().sort_values(ascending=False).index[:2]
         feature_x = top2[0].replace("_norm", "")
         feature_y = top2[1].replace("_norm", "")
 
-    # Build grid in original feature units — all other features at population median
     margin = 0.05
     x_min, x_max = X[feature_x].min(), X[feature_x].max()
     y_min, y_max = X[feature_y].min(), X[feature_y].max()
@@ -311,23 +383,19 @@ def precompute_boundary_data(
     grid_df[feature_x] = xx.ravel()
     grid_df[feature_y] = yy.ravel()
 
-    z_lr = lr_pipeline.predict_proba(grid_df)[:, 1].reshape(grid_n, grid_n)
-    z_en = en_pipeline.predict_proba(grid_df)[:, 1].reshape(grid_n, grid_n)
+    z_a = predict_proba_a(grid_df)[:, 1].reshape(grid_n, grid_n)
+    z_b = predict_proba_b(grid_df)[:, 1].reshape(grid_n, grid_n)
 
-    # Patient original points
-    # patient_idx values are positional (from enumerate) — use iloc not loc,
-    # because X may have a non-sequential integer index from the source data.
+    # patient_idx values are positional (from enumerate) — use iloc not loc
     patients = np.sort(all_deltas["patient_idx"].unique())
     X_pat = X.iloc[patients]
     orig_x = X_pat[feature_x].values
     orig_y = X_pat[feature_y].values
 
-    # Upper-plot trajectory destinations: mean CFE per (patient, model).
-    # NaN when a patient has no batch entry — filtered by finite-value checks downstream.
-    lr_cfe_x = np.full(len(patients), np.nan)
-    lr_cfe_y = np.full(len(patients), np.nan)
-    en_cfe_x = np.full(len(patients), np.nan)
-    en_cfe_y = np.full(len(patients), np.nan)
+    a_cfe_x = np.full(len(patients), np.nan)
+    a_cfe_y = np.full(len(patients), np.nan)
+    b_cfe_x = np.full(len(patients), np.nan)
+    b_cfe_y = np.full(len(patients), np.nan)
 
     if indiv_cfe_batch is not None:
         mean_dest = (
@@ -338,30 +406,26 @@ def precompute_boundary_data(
         for pat_pos, pat_idx in enumerate(patients):
             pat_idx = int(pat_idx)
             try:
-                lr_cfe_x[pat_pos] = mean_dest.loc[(pat_idx, "logistic_regression"), f"cfe_{feature_x}"]
-                lr_cfe_y[pat_pos] = mean_dest.loc[(pat_idx, "logistic_regression"), f"cfe_{feature_y}"]
+                a_cfe_x[pat_pos] = mean_dest.loc[(pat_idx, model_a_name), f"cfe_{feature_x}"]
+                a_cfe_y[pat_pos] = mean_dest.loc[(pat_idx, model_a_name), f"cfe_{feature_y}"]
             except KeyError:
                 pass
             try:
-                en_cfe_x[pat_pos] = mean_dest.loc[(pat_idx, "elastic_net"), f"cfe_{feature_x}"]
-                en_cfe_y[pat_pos] = mean_dest.loc[(pat_idx, "elastic_net"), f"cfe_{feature_y}"]
+                b_cfe_x[pat_pos] = mean_dest.loc[(pat_idx, model_b_name), f"cfe_{feature_x}"]
+                b_cfe_y[pat_pos] = mean_dest.loc[(pat_idx, model_b_name), f"cfe_{feature_y}"]
             except KeyError:
                 pass
 
-    # Shared axis range: union of all finite points + grid bounds
-    all_x = np.concatenate([orig_x, lr_cfe_x, en_cfe_x, [x_vals[0], x_vals[-1]]])
-    all_y = np.concatenate([orig_y, lr_cfe_y, en_cfe_y, [y_vals[0], y_vals[-1]]])
+    all_x = np.concatenate([orig_x, a_cfe_x, b_cfe_x, [x_vals[0], x_vals[-1]]])
+    all_y = np.concatenate([orig_y, a_cfe_y, b_cfe_y, [y_vals[0], y_vals[-1]]])
     finite_x = all_x[np.isfinite(all_x)]
     finite_y = all_y[np.isfinite(all_y)]
     x_range = [float(finite_x.min()) * 0.98, float(finite_x.max()) * 1.02]
     y_range = [float(finite_y.min()) * 0.98, float(finite_y.max()) * 1.02]
 
-    # Original class predictions — used for direction filter (0→1 vs 1→0)
-    lr_preds = lr_pipeline.predict(X_pat).astype(int)
-    en_preds = en_pipeline.predict(X_pat).astype(int)
+    a_preds = predict_class_a(X_pat)
+    b_preds = predict_class_b(X_pat)
 
-    # Select the two display features from the pre-built batch and rename to
-    # orig_x/orig_y/cfe_x/cfe_y so assemble_boundary_fig needs no changes.
     plot_batch = None
     if indiv_cfe_batch is not None:
         plot_batch = (
@@ -384,20 +448,22 @@ def precompute_boundary_data(
         feature_y=feature_y,
         x_vals=x_vals,
         y_vals=y_vals,
-        z_lr=z_lr,
-        z_en=z_en,
+        z_a=z_a,
+        z_b=z_b,
         patients=patients,
         orig_x=orig_x,
         orig_y=orig_y,
-        lr_cfe_x=lr_cfe_x,
-        lr_cfe_y=lr_cfe_y,
-        en_cfe_x=en_cfe_x,
-        en_cfe_y=en_cfe_y,
-        lr_preds=lr_preds,
-        en_preds=en_preds,
+        a_cfe_x=a_cfe_x,
+        a_cfe_y=a_cfe_y,
+        b_cfe_x=b_cfe_x,
+        b_cfe_y=b_cfe_y,
+        a_preds=a_preds,
+        b_preds=b_preds,
         x_range=x_range,
         y_range=y_range,
         indiv_cfe_batch=plot_batch,
+        model_a_name=model_a_name,
+        model_b_name=model_b_name,
     )
 
 
@@ -417,12 +483,7 @@ def _arrow_segments(
     mask: np.ndarray,
     patients: np.ndarray,
 ) -> tuple[list, list, list]:
-    """Build NaN-separated line arrays for patients where mask is True.
-
-    Returns xs, ys, and a parallel customdata list (patient index repeated
-    for origin and destination, None for separators) so click events on line
-    traces carry patient identity.
-    """
+    """Build NaN-separated line arrays for patients where mask is True."""
     xs: list = []
     ys: list = []
     cdata: list = []
@@ -476,23 +537,28 @@ def assemble_boundary_fig(
 ) -> go.Figure:
     """
     Build the decision boundary figure from pre-computed data.
+
+    indiv_model: "Both", "A" (model_a), or "B" (model_b)
     """
     feature_x = data["feature_x"]
     feature_y = data["feature_y"]
     patients = data["patients"]
+    model_a_name = data.get("model_a_name", "logistic_regression")
+    model_b_name = data.get("model_b_name", "elastic_net")
 
-    # FIX: Create a single unified mask that only includes patients
-    # where BOTH models agree on the starting prediction direction.
-    unified_mask = _direction_mask(data["lr_preds"], direction) & \
-                   _direction_mask(data["en_preds"], direction)
+    disp_a = _MODEL_DISPLAY.get(model_a_name, model_a_name)
+    disp_b = _MODEL_DISPLAY.get(model_b_name, model_b_name)
+    color_a = _MODEL_COLORS.get(model_a_name, _DEFAULT_COLOR_A)
+    color_b = _MODEL_COLORS.get(model_b_name, _DEFAULT_COLOR_B)
 
-    _LR_COLOR = "#2a9d8f"
-    _EN_COLOR = "#e76f51"
+    # Unified mask: only patients where BOTH models agree on direction
+    unified_mask = _direction_mask(data["a_preds"], direction) & \
+                   _direction_mask(data["b_preds"], direction)
 
     fig = make_subplots(
         rows=2, cols=2,
         subplot_titles=[
-            "Logistic Regression", "Elastic Net",
+            disp_a, disp_b,
             "Individual counterfactuals (both models)", "",
         ],
         horizontal_spacing=0.04,
@@ -500,33 +566,27 @@ def assemble_boundary_fig(
         row_heights=[0.5, 0.5],
     )
 
-    # Standard hover templates...
     hover_cfe = "Patient: %{customdata}<br>Value: %{x:.3f}, %{y:.3f}<extra>CFE</extra>"
     hover_arrow = "Patient: %{customdata}<extra>Arrow</extra>"
     hover_orig = "Patient: %{customdata}<br>Value: %{x:.3f}, %{y:.3f}<extra>Original</extra>"
 
-    # We iterate through the two models, but use the SAME unified_mask for both
-    for col, (z, cfe_x, cfe_y) in enumerate(
+    for col, (z, cfe_x, cfe_y, model_color) in enumerate(
             [
-                (data["z_lr"], data["lr_cfe_x"], data["lr_cfe_y"]),
-                (data["z_en"], data["en_cfe_x"], data["en_cfe_y"]),
+                (data["z_a"], data["a_cfe_x"], data["a_cfe_y"], color_a),
+                (data["z_b"], data["b_cfe_x"], data["b_cfe_y"], color_b),
             ],
             start=1,
     ):
         show = col == 1
-        model_color = _LR_COLOR if col == 1 else _EN_COLOR
         orig_x = data["orig_x"]
         orig_y = data["orig_y"]
 
-        # Find selected patient's positional index
         sel_pos = None
         if selected_patient is not None:
             idxs = np.where(patients == selected_patient)[0]
-            # Use unified_mask to ensure selection only happens if point is visible
             if idxs.size and unified_mask[idxs[0]]:
                 sel_pos = idxs[0]
 
-        # Background mask for arrows (excludes selected patient)
         bg_mask = unified_mask.copy()
         if sel_pos is not None:
             bg_mask[sel_pos] = False
@@ -575,8 +635,6 @@ def assemble_boundary_fig(
         )
 
         # Trace 3/8 — CFE destination markers
-        # patients.tolist() forces plain JSON ints; numpy arrays get binary-encoded
-        # by Plotly 6.x, which breaks clickData scalar extraction in Dash.
         patients_list = patients.tolist()
         cfe_opacities = _point_opacities(unified_mask, patients, selected_patient, full=0.75, dim=0.1)
         cfe_sizes = _point_sizes(patients, selected_patient, normal=5, highlighted=11)
@@ -593,8 +651,7 @@ def assemble_boundary_fig(
         # Trace 4/9 — Original scatter markers
         orig_opacities = _point_opacities(unified_mask, patients, selected_patient, full=0.85, dim=0.15)
         orig_sizes = _point_sizes(patients, selected_patient, normal=6, highlighted=11)
-        orig_colors = ["#ffffff" if (selected_patient is not None and p == selected_patient) else "#d4d4d4" for p in
-                       patients]
+        orig_colors = ["#ffffff" if (selected_patient is not None and p == selected_patient) else "#d4d4d4" for p in patients]
         fig.add_trace(
             go.Scatter(
                 x=orig_x, y=orig_y, mode="markers",
@@ -610,12 +667,12 @@ def assemble_boundary_fig(
     fig.update_yaxes(title_text=feature_y, range=data["y_range"], row=1, col=1)
     fig.update_yaxes(range=data["y_range"], row=1, col=2)
 
-    # Two separate legend entries for LR and EN CFE destinations (traces 10, 11)
+    # Traces 10, 11 — legend dummy entries
     fig.add_trace(
         go.Scatter(
             x=[None], y=[None], mode="markers",
-            marker=dict(symbol="circle", size=6, color=_LR_COLOR, line=dict(width=0.5, color="grey")),
-            name="LR counterfactual",
+            marker=dict(symbol="circle", size=6, color=color_a, line=dict(width=0.5, color="grey")),
+            name=f"{disp_a} counterfactual",
             showlegend=True,
         ),
         row=1, col=1,
@@ -623,69 +680,65 @@ def assemble_boundary_fig(
     fig.add_trace(
         go.Scatter(
             x=[None], y=[None], mode="markers",
-            marker=dict(symbol="circle", size=6, color=_EN_COLOR, line=dict(width=0.5, color="grey")),
-            name="EN counterfactual",
+            marker=dict(symbol="circle", size=6, color=color_b, line=dict(width=0.5, color="grey")),
+            name=f"{disp_b} counterfactual",
             showlegend=True,
         ),
         row=1, col=1,
     )
 
-    # --- Lower-left subplot: individual CFEs for selected patient ---
+    # Traces 12, 13 — lower-left boundary contours
     fig.add_trace(
         go.Contour(
-            x=data["x_vals"], y=data["y_vals"], z=data["z_lr"],
+            x=data["x_vals"], y=data["y_vals"], z=data["z_a"],
             contours=dict(coloring="none", showlines=True, start=0.5, end=0.5, size=1),
-            line=dict(color=_LR_COLOR, width=2, dash="dash"),
-            showscale=False, opacity=0.7, name="LR boundary",
+            line=dict(color=color_a, width=2, dash="dash"),
+            showscale=False, opacity=0.7, name=f"{disp_a} boundary",
             showlegend=True, hoverinfo="skip",
         ),
         row=2, col=1,
     )
     fig.add_trace(
         go.Contour(
-            x=data["x_vals"], y=data["y_vals"], z=data["z_en"],
+            x=data["x_vals"], y=data["y_vals"], z=data["z_b"],
             contours=dict(coloring="none", showlines=True, start=0.5, end=0.5, size=1),
-            line=dict(color=_EN_COLOR, width=2, dash="dash"),
-            showscale=False, opacity=0.7, name="EN boundary",
+            line=dict(color=color_b, width=2, dash="dash"),
+            showscale=False, opacity=0.7, name=f"{disp_b} boundary",
             showlegend=True, hoverinfo="skip",
         ),
         row=2, col=1,
     )
 
     # --- Lower-right subplot: PCA structure scatter ---
-    # Trace 14 = background (all visible non-selected patients)
-    # Trace 15 = highlight (selected patient only)
-    # Two traces are always added to keep indices stable for the callback.
+    # Traces 14 (bg) and 15 (highlight) always added for stable indices
     if pca_results is not None:
         n_features = sum(1 for c in pca_results.columns if c.startswith("pc1_v"))
-        lr_pca = pca_results[pca_results["model"] == "logistic_regression"].set_index("patient_idx")
-        en_pca = pca_results[pca_results["model"] == "elastic_net"].set_index("patient_idx")
-        shared_pca = lr_pca.index.intersection(en_pca.index)
+        a_pca = pca_results[pca_results["model"] == model_a_name].set_index("patient_idx")
+        b_pca = pca_results[pca_results["model"] == model_b_name].set_index("patient_idx")
+        shared_pca = a_pca.index.intersection(b_pca.index)
 
         visible_patients = set(patients[unified_mask].tolist())
         shared_f = shared_pca[shared_pca.isin(visible_patients)]
-        lr_f = lr_pca.loc[shared_f]
-        en_f = en_pca.loc[shared_f]
+        a_f = a_pca.loc[shared_f]
+        b_f = b_pca.loc[shared_f]
 
         pc1_cols = [f"pc1_v{i}" for i in range(n_features)]
 
-        # Full-population confidence diff — used for stable x axis range regardless of filter state.
-        lr_full = lr_pca.loc[shared_pca]
-        en_full = en_pca.loc[shared_pca]
-        confidence_diff_full = lr_full["mean_confidence"].values - en_full["mean_confidence"].values
+        a_full = a_pca.loc[shared_pca]
+        b_full = b_pca.loc[shared_pca]
+        confidence_diff_full = a_full["mean_confidence"].values - b_full["mean_confidence"].values
         x_max_pca = (
             max(abs(float(confidence_diff_full.min())), abs(float(confidence_diff_full.max())))
             if len(confidence_diff_full) > 0 else 0.5
         )
 
-        # Filtered metrics (visible patients only, honouring the direction filter)
-        lr_pc1 = lr_f[pc1_cols].values
-        en_pc1 = en_f[pc1_cols].values
+        a_pc1 = a_f[pc1_cols].values
+        b_pc1 = b_f[pc1_cols].values
 
-        dots = np.clip(np.abs((lr_pc1 * en_pc1).sum(axis=1)), -1.0, 1.0)
+        dots = np.clip(np.abs((a_pc1 * b_pc1).sum(axis=1)), -1.0, 1.0)
         pc1_angle = np.degrees(np.arccos(dots))
-        confidence_diff = lr_f["mean_confidence"].values - en_f["mean_confidence"].values
-        reliability = np.minimum(lr_f["pc1_ratio"].values, en_f["pc1_ratio"].values)
+        confidence_diff = a_f["mean_confidence"].values - b_f["mean_confidence"].values
+        reliability = np.minimum(a_f["pc1_ratio"].values, b_f["pc1_ratio"].values)
 
         bg_x, bg_y, bg_opacities, bg_cdata = [], [], [], []
         hl_x, hl_y, hl_cdata = [], [], []
@@ -713,7 +766,7 @@ def assemble_boundary_fig(
                 customdata=bg_cdata,
                 hovertemplate=(
                     "Patient: %{customdata}<br>"
-                    "Mean confidence diff (LR−EN): %{x:.3f}<br>"
+                    f"Mean confidence diff ({disp_a}−{disp_b}): " + "%{x:.3f}<br>"
                     "PC1 angle: %{y:.1f}°"
                     "<extra></extra>"
                 ),
@@ -734,7 +787,7 @@ def assemble_boundary_fig(
                 customdata=hl_cdata,
                 hovertemplate=(
                     "Patient: %{customdata}<br>"
-                    "Mean confidence diff (LR−EN): %{x:.3f}<br>"
+                    f"Mean confidence diff ({disp_a}−{disp_b}): " + "%{x:.3f}<br>"
                     "PC1 angle: %{y:.1f}°"
                     "<extra></extra>"
                 ),
@@ -744,7 +797,7 @@ def assemble_boundary_fig(
         )
 
         fig.update_xaxes(
-            title_text="← EN's CFEs land deeper   |   LR's CFEs land deeper →",
+            title_text=f"← {disp_b}'s CFEs land deeper   |   {disp_a}'s CFEs land deeper →",
             range=[-x_max_pca * 1.1, x_max_pca * 1.1],
             zeroline=True, zerolinecolor=GRID_COLOR, zerolinewidth=1,
             row=2, col=2,
@@ -777,54 +830,54 @@ def assemble_boundary_fig(
     indiv_batch = data.get("indiv_cfe_batch")
     if selected_patient is not None and indiv_batch is not None:
         pat_df = indiv_batch[indiv_batch["patient_idx"] == selected_patient]
-        show_lr = indiv_model in ("Both", "LR")
-        show_en = indiv_model in ("Both", "EN")
+        show_a = indiv_model in ("Both", "A")
+        show_b = indiv_model in ("Both", "B")
 
-        lr_df = pat_df[pat_df["model"] == "logistic_regression"].dropna(subset=["cfe_x", "cfe_y"]) if show_lr else pd.DataFrame()
-        en_df = pat_df[pat_df["model"] == "elastic_net"].dropna(subset=["cfe_x", "cfe_y"]) if show_en else pd.DataFrame()
+        a_df = pat_df[pat_df["model"] == model_a_name].dropna(subset=["cfe_x", "cfe_y"]) if show_a else pd.DataFrame()
+        b_df = pat_df[pat_df["model"] == model_b_name].dropna(subset=["cfe_x", "cfe_y"]) if show_b else pd.DataFrame()
 
         if not pat_df.empty:
             orig_x_pt = float(pat_df["orig_x"].iloc[0])
             orig_y_pt = float(pat_df["orig_y"].iloc[0])
 
-            if not lr_df.empty:
-                lr_xs, lr_ys = [], []
-                for _, r in lr_df.iterrows():
-                    lr_xs += [orig_x_pt, float(r["cfe_x"]), None]
-                    lr_ys += [orig_y_pt, float(r["cfe_y"]), None]
+            if not a_df.empty:
+                a_xs, a_ys = [], []
+                for _, r in a_df.iterrows():
+                    a_xs += [orig_x_pt, float(r["cfe_x"]), None]
+                    a_ys += [orig_y_pt, float(r["cfe_y"]), None]
                 fig.add_trace(
-                    go.Scatter(x=lr_xs, y=lr_ys, mode="lines",
-                               line=dict(color=_LR_COLOR, width=1), opacity=0.4,
+                    go.Scatter(x=a_xs, y=a_ys, mode="lines",
+                               line=dict(color=color_a, width=1), opacity=0.4,
                                showlegend=False, hoverinfo="skip"),
                     row=2, col=1,
                 )
                 fig.add_trace(
                     go.Scatter(
-                        x=lr_df["cfe_x"].tolist(), y=lr_df["cfe_y"].tolist(), mode="markers",
-                        marker=dict(color=_LR_COLOR, size=6, opacity=0.7, line=dict(width=0.5, color="grey")),
-                        name="LR CFE", showlegend=False,
-                        hovertemplate="LR CFE: (%{x:.3f}, %{y:.3f})<extra></extra>",
+                        x=a_df["cfe_x"].tolist(), y=a_df["cfe_y"].tolist(), mode="markers",
+                        marker=dict(color=color_a, size=6, opacity=0.7, line=dict(width=0.5, color="grey")),
+                        name=f"{disp_a} CFE", showlegend=False,
+                        hovertemplate=f"{disp_a} CFE: (%{{x:.3f}}, %{{y:.3f}})<extra></extra>",
                     ),
                     row=2, col=1,
                 )
 
-            if not en_df.empty:
-                en_xs, en_ys = [], []
-                for _, r in en_df.iterrows():
-                    en_xs += [orig_x_pt, float(r["cfe_x"]), None]
-                    en_ys += [orig_y_pt, float(r["cfe_y"]), None]
+            if not b_df.empty:
+                b_xs, b_ys = [], []
+                for _, r in b_df.iterrows():
+                    b_xs += [orig_x_pt, float(r["cfe_x"]), None]
+                    b_ys += [orig_y_pt, float(r["cfe_y"]), None]
                 fig.add_trace(
-                    go.Scatter(x=en_xs, y=en_ys, mode="lines",
-                               line=dict(color=_EN_COLOR, width=1), opacity=0.4,
+                    go.Scatter(x=b_xs, y=b_ys, mode="lines",
+                               line=dict(color=color_b, width=1), opacity=0.4,
                                showlegend=False, hoverinfo="skip"),
                     row=2, col=1,
                 )
                 fig.add_trace(
                     go.Scatter(
-                        x=en_df["cfe_x"].tolist(), y=en_df["cfe_y"].tolist(), mode="markers",
-                        marker=dict(color=_EN_COLOR, size=6, opacity=0.7, line=dict(width=0.5, color="grey")),
-                        name="EN CFE", showlegend=False,
-                        hovertemplate="EN CFE: (%{x:.3f}, %{y:.3f})<extra></extra>",
+                        x=b_df["cfe_x"].tolist(), y=b_df["cfe_y"].tolist(), mode="markers",
+                        marker=dict(color=color_b, size=6, opacity=0.7, line=dict(width=0.5, color="grey")),
+                        name=f"{disp_b} CFE", showlegend=False,
+                        hovertemplate=f"{disp_b} CFE: (%{{x:.3f}}, %{{y:.3f}})<extra></extra>",
                     ),
                     row=2, col=1,
                 )
@@ -863,8 +916,8 @@ def assemble_boundary_fig(
         clickmode="event",
     )
 
-    fig.layout.annotations[0].font.color = _LR_COLOR
-    fig.layout.annotations[1].font.color = _EN_COLOR
+    fig.layout.annotations[0].font.color = color_a
+    fig.layout.annotations[1].font.color = color_b
 
     fig.add_annotation(
         text="Boundaries computed with all other features held at population median.",
@@ -880,14 +933,22 @@ def assemble_boundary_fig(
 def build_boundary_view(
     all_deltas: pd.DataFrame,
     X: pd.DataFrame,
-    lr_pipeline,
-    en_pipeline,
+    predict_proba_a,
+    predict_class_a,
+    predict_proba_b,
+    predict_class_b,
+    model_a_name: str = "logistic_regression",
+    model_b_name: str = "elastic_net",
     feature_x: str | None = None,
     feature_y: str | None = None,
     grid_n: int = 60,
 ) -> go.Figure:
     """Convenience wrapper: precompute data then assemble the figure."""
     data = precompute_boundary_data(
-        all_deltas, X, lr_pipeline, en_pipeline, feature_x, feature_y, grid_n
+        all_deltas, X,
+        predict_proba_a, predict_class_a,
+        predict_proba_b, predict_class_b,
+        model_a_name, model_b_name,
+        feature_x, feature_y, grid_n,
     )
     return assemble_boundary_fig(data)
