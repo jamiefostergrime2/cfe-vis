@@ -792,24 +792,24 @@ def assemble_boundary_fig(
             zeroline=True, zerolinecolor=GRID_COLOR, zerolinewidth=1,
             row=2, col=2,
         )
-        fig.update_yaxes(title_text="PC1 angle between models (degrees)", range=[0, 92], row=2, col=2)
+        fig.update_yaxes(title_text="Angle between CFE PC1 vectors (°)", range=[0, 92], row=2, col=2)
 
         fig.add_annotation(
             x=-0.2, y=85, ax=-0.2, ay=15,
             xref="x4", yref="y4", axref="x4", ayref="y4",
-            arrowhead=2, arrowside="end+start", arrowsize=1.2,
+            arrowhead=2, arrowside="end+start", arrowsize=2,
             arrowcolor=GRID_COLOR,
             showarrow=True, text="",
         )
         fig.add_annotation(
             x=-0.175, y=60, xref="x4", yref="y4",
-            text="Models look different ways",
-            showarrow=False, font=dict(color=TEXT_COLOR, size=10), xanchor="left",
+            text="Divergent PC1 of CFEs",
+            showarrow=False, font=dict(color=TEXT_COLOR, size=12), xanchor="left",
         )
         fig.add_annotation(
             x=-0.175, y=35, xref="x4", yref="y4",
-            text="Models look similar ways",
-            showarrow=False, font=dict(color=TEXT_COLOR, size=10), xanchor="left",
+            text="Aligned PC1 of CFEs",
+            showarrow=False, font=dict(color=TEXT_COLOR, size=12), xanchor="left",
         )
     else:
         for _ in range(2):
