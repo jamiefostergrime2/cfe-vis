@@ -116,6 +116,8 @@ def build_heatmap(
     disp_a = _MODEL_DISPLAY.get(model_a_name, model_a_name)
     disp_b = _MODEL_DISPLAY.get(model_b_name, model_b_name)
 
+    obs_max = float(divergence.values.max()) if divergence.size > 0 else 1.0
+
     if condensed:
         z = divergence.mean(axis=0).values.reshape(1, -1)
         y_labels = ["Mean disagreement"]
@@ -125,7 +127,7 @@ def build_heatmap(
         divergence = divergence.loc[divergence.sum(axis=1).sort_values(ascending=True).index]
         z = divergence.values
         y_labels = [f"Patient {i+1}" for i in divergence.index]
-        title = f"Where do {disp_a} and {disp_b} diverge?"
+        title = f"{disp_a} vs {disp_b}: Feature Disagreement Breakdown"
         yaxis_cfg = dict(
             title=dict(text="Patients (Least to most model disagreement)", standoff=10),
             showticklabels=False,
@@ -138,8 +140,8 @@ def build_heatmap(
             y=y_labels,
             colorscale="OrRd",
             zmin=0,
-            zmax=1,
-            colorbar=dict(title="Absolute<br>disagreement"),
+            zmax=obs_max,
+            colorbar=dict(title="Absolute<br>disagreement<br>(MinMaxScale)"),
             hovertemplate=(
                 "Feature: %{x}<br>"
                 "Patient: %{y}<br>"

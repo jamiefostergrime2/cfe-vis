@@ -153,36 +153,34 @@ def layout():
                 ),
             ], width="auto", className="d-flex align-items-center ms-3"),
             dbc.Col([
-                dbc.InputGroup([
-                    dbc.InputGroupText("X axis:"),
-                    dbc.Select(
-                        id="p2-feature-x",
-                        options=_FEATURE_OPTIONS,
-                        value=fx,
-                        style=_SELECT_STYLE,
-                    ),
-                ], size="sm"),
-            ], width="auto", className="ms-3"),
+                dbc.Label("X axis:", className="me-2 mb-0"),
+                dbc.Select(
+                    id="p2-feature-x",
+                    options=_FEATURE_OPTIONS,
+                    value=fx,
+                    size="sm",
+                    style=_SELECT_STYLE,
+                ),
+            ], width="auto", className="d-flex align-items-center ms-3"),
             dbc.Col([
                 dbc.Label("vs", className="mb-0"),
             ], width="auto", className="d-flex align-items-center ms-2"),
             dbc.Col([
-                dbc.InputGroup([
-                    dbc.InputGroupText("Y axis:"),
-                    dbc.Select(
-                        id="p2-feature-y",
-                        options=_FEATURE_OPTIONS,
-                        value=fy,
-                        style=_SELECT_STYLE,
-                    ),
-                ], size="sm"),
-            ], width="auto", className="ms-2"),
-        ], className="mb-2 align-items-baseline"),
+                dbc.Label("Y axis:", className="me-2 mb-0"),
+                dbc.Select(
+                    id="p2-feature-y",
+                    options=_FEATURE_OPTIONS,
+                    value=fy,
+                    size="sm",
+                    style=_SELECT_STYLE,
+                ),
+            ], width="auto", className="d-flex align-items-center ms-2"),
+        ], className="mb-2 align-items-center"),
 
         dcc.Graph(
             id="p2-boundary-graph",
             figure=assemble_boundary_fig(data, pca_results=pair.get("pca_results")),
-            style={"height": "calc(100vh - 180px)"},
+            style={"height": "calc(100vh - 200px)"},
         ),
 
     ], fluid=True, className="pt-0")
